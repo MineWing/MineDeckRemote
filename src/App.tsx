@@ -19,6 +19,21 @@ const statusStyle: Record<ServerStatus, string> = {
   running: 'bg-lime-400', starting: 'bg-amber-400', stopping: 'bg-amber-400', crashed: 'bg-red-400', stopped: 'bg-zinc-500',
 }
 
+type ToastTone = 'success' | 'info' | 'warning' | 'error'
+interface Toast { id: number; group?: string; tone: ToastTone; title: string; message: string }
+type ToastContent = Omit<Toast, 'id' | 'group'>
+
+export function statusNotification(server: Pick<ServerView, 'name' | 'status' | 'autoRestart'>, previous: ServerStatus, restarting = false): ToastContent | undefined {
+  if (server.status === previous) return
+  if (server.status === 'starting') return { tone: 'info', title: restarting || previous === 'crashed' ? 'Restarting server' : 'Starting server', message: `${server.name} is warming up…` }
+  if (server.status === 'running') return { tone: 'success', title: 'Server online', message: `${server.name} is ready for players.` }
+  if (server.status === 'stopping') return { tone: 'warning', title: restarting ? 'Restarting server' : 'Stopping server', message: `${server.name} is saving the world…` }
+  if (server.status === 'stopped') return restarting
+    ? { tone: 'info', title: 'Restarting server', message: `${server.name} is starting again…` }
+    : { tone: 'success', title: 'Server stopped', message: `${server.name} is safely offline.` }
+  return { tone: 'error', title: 'Server crashed', message: `${server.name} exited unexpectedly.${server.autoRestart ? ' Restarting in 5 seconds…' : ''}` }
+}
+
 const prettyStatus = (status: ServerStatus) => status.charAt(0).toUpperCase() + status.slice(1)
 const formatUptime = (seconds: number) => {
   if (!seconds) return '—'
@@ -33,6 +48,29 @@ function Logo({ compact = false }: { compact?: boolean }) {
   return <div className="flex items-center gap-3">
     <div className={`${compact ? 'h-8 w-8 rounded-lg' : 'h-10 w-10 rounded-xl'} brand-cube shrink-0`} />
     <div><div className={`${compact ? 'text-lg' : 'text-xl'} font-black tracking-tight text-white`}>MineDeck</div>{!compact && <div className="text-[10px] font-bold uppercase tracking-[.22em] text-deck-400">Server control</div>}</div>
+  </div>
+}
+
+const toastStyle: Record<ToastTone, { icon: string; border: string; glow: string; bar: string }> = {
+  success: { icon: '✓', border: 'border-lime-500/40', glow: 'bg-lime-400/15 text-lime-300', bar: 'bg-lime-400' },
+  info: { icon: '↻', border: 'border-sky-500/40', glow: 'bg-sky-400/15 text-sky-300', bar: 'bg-sky-400' },
+  warning: { icon: '!', border: 'border-amber-500/40', glow: 'bg-amber-400/15 text-amber-300', bar: 'bg-amber-400' },
+  error: { icon: '×', border: 'border-red-500/40', glow: 'bg-red-400/15 text-red-300', bar: 'bg-red-400' },
+}
+
+function Toasts({ items, onDismiss }: { items: Toast[]; onDismiss: (id: number) => void }) {
+  return <div className="pointer-events-none fixed inset-x-3 top-3 z-[60] flex flex-col items-end gap-3 sm:left-auto sm:right-5 sm:top-5 sm:w-96" aria-live="polite" aria-atomic="true">
+    {items.map((toast) => {
+      const style = toastStyle[toast.tone]
+      return <div key={toast.id} role={toast.tone === 'error' ? 'alert' : 'status'} className={`toast pointer-events-auto relative w-full overflow-hidden rounded-2xl border ${style.border} bg-zinc-900/95 p-4 pr-12 shadow-2xl shadow-black/40 backdrop-blur-xl`}>
+        <div className="flex gap-3">
+          <span aria-hidden="true" className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl text-lg font-black shadow-[0_0_24px_currentColor] ${style.glow}`}>{style.icon}</span>
+          <div className="min-w-0 pt-0.5"><div className="font-bold text-white">{toast.title}</div><div className="mt-1 text-sm leading-5 text-zinc-400">{toast.message}</div></div>
+        </div>
+        <button className="absolute right-2 top-2 grid h-10 w-10 place-items-center rounded-xl text-xl text-zinc-600 transition hover:bg-white/5 hover:text-white" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification">×</button>
+        <span className={`toast-timer absolute inset-x-0 bottom-0 h-0.5 ${style.bar}`} />
+      </div>
+    })}
   </div>
 }
 
@@ -85,24 +123,31 @@ const formValue = (server?: ServerView): ServerFormValue => ({
 
 function ServerForm({ server, onSaved, onCancel, onDelete }: { server?: ServerView; onSaved: (server: ServerView) => void; onCancel?: () => void; onDelete?: () => void }) {
   const [value, setValue] = useState(() => formValue(server))
+  const [mode, setMode] = useState<'import' | 'manual'>(server ? 'manual' : 'import')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   useEffect(() => setValue(formValue(server)), [server?.id])
   const set = <K extends keyof ServerFormValue>(key: K, next: ServerFormValue[K]) => setValue((current) => ({ ...current, [key]: next }))
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError('')
-    const payload = { ...value, javaArgs: value.javaArgs.split('\n').map((arg) => arg.trim()).filter(Boolean) }
+    const importing = !server && mode === 'import'
+    const payload = importing ? { name: value.name, directory: value.directory } : { ...value, javaArgs: value.javaArgs.split('\n').map((arg) => arg.trim()).filter(Boolean) }
     try {
-      const saved = await api<ServerView>(server ? `/api/servers/${server.id}` : '/api/servers', { method: server ? 'PUT' : 'POST', body: JSON.stringify(payload) })
+      const saved = await api<ServerView>(server ? `/api/servers/${server.id}` : importing ? '/api/servers/import' : '/api/servers', { method: server ? 'PUT' : 'POST', body: JSON.stringify(payload) })
       onSaved(saved)
     } catch (reason) { setError((reason as Error).message) } finally { setBusy(false) }
   }
   return <form onSubmit={submit} className="space-y-5 p-5 sm:p-6">
-    <div className="grid gap-4 sm:grid-cols-2">
-      <label><span className="label">Server name</span><input className="field" required maxLength={50} value={value.name} onChange={(event) => set('name', event.target.value)} placeholder="Survival" /></label>
+    {!server && <div className="grid grid-cols-2 gap-2 rounded-xl bg-zinc-950 p-1">
+      <button type="button" aria-pressed={mode === 'import'} className={mode === 'import' ? 'btn-primary' : 'btn-muted'} onClick={() => { setMode('import'); setError('') }}>Import existing</button>
+      <button type="button" aria-pressed={mode === 'manual'} className={mode === 'manual' ? 'btn-primary' : 'btn-muted'} onClick={() => { setMode('manual'); setError('') }}>Manual setup</button>
+    </div>}
+    <label><span className="label">Server name</span><input className="field" required maxLength={50} value={value.name} onChange={(event) => set('name', event.target.value)} placeholder="Survival" /></label>
+    <label><span className="label">Server directory</span><input className="field font-mono" required value={value.directory} onChange={(event) => set('directory', event.target.value)} placeholder="C:\Minecraft\Survival" /><span className="mt-1.5 block text-xs text-zinc-600">{!server && mode === 'import' ? <>The existing folder containing <code>start.bat</code>.</> : <>An existing folder containing the JAR file. <code>~/…</code> is supported.</>}</span></label>
+    {(!server && mode === 'manual' || server) && <>
+      <div className="grid gap-4 sm:grid-cols-2">
       <label><span className="label">Server JAR</span><input className="field font-mono" required value={value.jar} onChange={(event) => set('jar', event.target.value)} placeholder="server.jar" /></label>
-    </div>
-    <label><span className="label">Server directory</span><input className="field font-mono" required value={value.directory} onChange={(event) => set('directory', event.target.value)} placeholder="/Users/alex/minecraft/survival" /><span className="mt-1.5 block text-xs text-zinc-600">An existing folder containing the JAR file. <code>~/…</code> is supported.</span></label>
+      </div>
     <div className="grid gap-4 sm:grid-cols-3">
       <label><span className="label">Java command</span><input className="field font-mono" required value={value.javaPath} onChange={(event) => set('javaPath', event.target.value)} /></label>
       <label><span className="label">Minimum RAM (MB)</span><input className="field" type="number" min={256} max={65536} required value={value.minMemoryMb} onChange={(event) => set('minMemoryMb', event.target.valueAsNumber)} /></label>
@@ -116,10 +161,11 @@ function ServerForm({ server, onSaved, onCancel, onDelete }: { server?: ServerVi
         <span><span className="block text-sm font-semibold text-zinc-200">Automatic restart</span><span className="text-xs text-zinc-500">Restart five seconds after a crash</span></span>
       </label>
     </div>
+    </>}
     {error && <div role="alert" className="rounded-xl border border-red-900/60 bg-red-950/40 px-3 py-2 text-sm text-red-300">{error}</div>}
     <div className="flex flex-wrap justify-between gap-3 border-t border-zinc-800 pt-5">
       <div>{server && onDelete && <button type="button" className="btn-danger" onClick={onDelete}>Remove server</button>}</div>
-      <div className="flex gap-2">{onCancel && <button type="button" className="btn-muted" onClick={onCancel}>Cancel</button>}<button className="btn-primary" disabled={busy || Boolean(server?.status !== 'stopped' && server?.status !== 'crashed')}>{busy ? 'Saving…' : server ? 'Save changes' : 'Add server'}</button></div>
+      <div className="flex gap-2">{onCancel && <button type="button" className="btn-muted" onClick={onCancel}>Cancel</button>}<button className="btn-primary" disabled={busy || Boolean(server?.status !== 'stopped' && server?.status !== 'crashed')}>{busy ? 'Saving…' : server ? 'Save changes' : mode === 'import' ? 'Import server' : 'Add server'}</button></div>
     </div>
   </form>
 }
@@ -232,10 +278,19 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [addOpen, setAddOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
   const [error, setError] = useState('')
+  const [toasts, setToasts] = useState<Toast[]>([])
+  const statuses = useRef(new Map<string, ServerStatus>())
+  const restarting = useRef(new Set<string>())
+  const nextToastId = useRef(0)
   const selected = servers.find((server) => server.id === selectedId)
+  const notify = (content: ToastContent, group?: string) => {
+    const id = ++nextToastId.current
+    setToasts((items) => [...items.filter((item) => !group || item.group !== group), { ...content, id, group }].slice(-4))
+    window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 5_000)
+  }
 
   useEffect(() => {
-    void api<ServerView[]>('/api/servers').then((items) => { setServers(items); setSelectedId((id) => id || items[0]?.id || '') }).catch((reason) => setError(reason.message))
+    void api<ServerView[]>('/api/servers').then((items) => { statuses.current = new Map(items.map((server) => [server.id, server.status])); setServers(items); setSelectedId((id) => id || items[0]?.id || '') }).catch((reason) => setError(reason.message))
   }, [])
   useEffect(() => {
     if (!selectedId || logs[selectedId]) return
@@ -251,6 +306,15 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       socket.onmessage = ({ data }) => {
         const event = JSON.parse(data) as SocketEvent
         if (event.type === 'servers') {
+          for (const server of event.servers) {
+            const previous = statuses.current.get(server.id)
+            if (previous && previous !== server.status) {
+              const notice = statusNotification(server, previous, restarting.current.has(server.id))
+              if (notice) notify(notice, `server:${server.id}`)
+              if (server.status === 'running' || server.status === 'crashed') restarting.current.delete(server.id)
+            }
+          }
+          statuses.current = new Map(event.servers.map((server) => [server.id, server.status]))
           setServers(event.servers)
           setSelectedId((id) => id || event.servers[0]?.id || '')
         } else setLogs((current) => ({ ...current, [event.serverId]: [...(current[event.serverId] ?? []), event.line].slice(-800) }))
@@ -264,8 +328,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const action = async (name: 'start' | 'stop' | 'restart' | 'kill') => {
     if (!selected) return
     setError('')
+    if (name === 'restart') restarting.current.add(selected.id)
     try { await api(`/api/servers/${selected.id}/actions/${name}`, { method: 'POST' }) }
-    catch (reason) { setError((reason as Error).message) }
+    catch (reason) {
+      restarting.current.delete(selected.id)
+      const message = (reason as Error).message
+      setError(message)
+      notify({ tone: 'error', title: 'Action failed', message }, `server:${selected.id}`)
+    }
   }
   const logout = async () => { await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined); onLogout() }
   const remove = async () => {
@@ -276,6 +346,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const select = (id: string) => { setSelectedId(id); setTab('console'); setError('') }
 
   return <div className="min-h-screen bg-zinc-950 text-zinc-200">
+    <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-zinc-800/80 bg-zinc-950 lg:flex">
       <div className="border-b border-zinc-800/80 p-5"><Logo /></div>
       <div className="flex items-center justify-between px-5 pb-2 pt-5"><span className="text-[11px] font-bold uppercase tracking-[.18em] text-zinc-600">Your servers</span><span className="rounded-full bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-500">{servers.length}</span></div>

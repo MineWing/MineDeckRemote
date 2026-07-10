@@ -47,3 +47,17 @@
   text-align: right;
   user-select: none;
 }
+
+.toast { animation: toast-in .38s cubic-bezier(.2, .9, .2, 1) both, toast-out .25s ease-in 4.75s forwards; }
+.toast-timer { transform-origin: left; animation: toast-timer 5s linear forwards; }
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translate3d(1.5rem, -.5rem, 0) scale(.96); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes toast-out { to { opacity: 0; transform: translate3d(1rem, 0, 0) scale(.98); } }
+@keyframes toast-timer { to { transform: scaleX(0); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .toast, .toast-timer { animation: none; }
+}
