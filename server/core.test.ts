@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, realpath, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { importServerConfig, resolveInside } from './core.ts'
+import { importServerConfig, resolveInside, validateUploadName } from './core.ts'
 import { ServerManager, type StoredData } from './manager.ts'
 
 test('file paths stay inside a server directory, including through symlinks', async () => {
@@ -11,10 +11,19 @@ test('file paths stay inside a server directory, including through symlinks', as
   const outside = await mkdtemp(join(tmpdir(), 'minedeck-outside-'))
   await mkdir(join(root, 'config'))
   await writeFile(join(root, 'config', 'server.properties'), 'motd=MineDeck')
-  assert.equal(await resolveInside(root, 'config/server.properties'), join(root, 'config', 'server.properties'))
+  assert.equal(await resolveInside(root, 'config/server.properties'), await realpath(join(root, 'config', 'server.properties')))
   await assert.rejects(resolveInside(root, '../secret'))
   await symlink(outside, join(root, 'escape'), 'junction')
   await assert.rejects(resolveInside(root, 'escape'))
+})
+
+test('upload names cannot smuggle a path outside the selected directory', () => {
+  assert.equal(validateUploadName('paper-1.21.jar'), 'paper-1.21.jar')
+  assert.throws(() => validateUploadName('../secret.txt'))
+  assert.throws(() => validateUploadName('nested/file.txt'))
+  assert.throws(() => validateUploadName('nested\\file.txt'))
+  assert.throws(() => validateUploadName(`${'界'.repeat(86)}.txt`))
+  assert.throws(() => validateUploadName(''))
 })
 
 test('the same server JAR cannot be registered twice through path aliases', async () => {
@@ -42,4 +51,15 @@ test('an existing server can be imported from start.bat', async () => {
   assert.equal(config.minMemoryMb, 2048)
   assert.equal(config.maxMemoryMb, 4096)
   assert.deepEqual(config.javaArgs, ['-XX:+UseG1GC'])
+})
+
+test('an existing server.jar can be imported without start.bat', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'minedeck-import-'))
+  await writeFile(join(directory, 'server.jar'), 'placeholder')
+
+  const config = await importServerConfig({ name: 'Existing server', directory })
+  assert.equal(config.jar, 'server.jar')
+  assert.equal(config.javaPath, 'java')
+  assert.equal(config.minMemoryMb, 1024)
+  assert.equal(config.maxMemoryMb, 2048)
 })

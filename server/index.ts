@@ -1,14 +1,17 @@
 import Fastify from 'fastify'
 import fastifyStatic from '@fastify/static'
-import { constants } from 'node:fs'
-import { lstat, mkdir, open, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
+import fastifyMultipart from '@fastify/multipart'
+import { constants, createWriteStream } from 'node:fs'
+import { link, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
+import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
+import trash from 'trash'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { FileEntry, SocketEvent } from '../shared.ts'
-import { importServerConfig, InputError, resolveInside, validateServerConfig } from './core.ts'
+import { importServerConfig, InputError, resolveInside, validateServerConfig, validateUploadName } from './core.ts'
 import { ServerManager, type StoredData } from './manager.ts'
 
 const scryptAsync = promisify(scrypt)
@@ -17,6 +20,8 @@ const PORT = Number(process.env.MINEDECK_PORT ?? 8787)
 const HOST = process.env.MINEDECK_HOST ?? '0.0.0.0'
 const SESSION_HOURS = 12
 const MAX_FILE_BYTES = 2 * 1024 * 1024
+const MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+const MAX_UPLOAD_FILES = 20
 
 await mkdir(dirname(DATA_PATH), { recursive: true })
 
@@ -65,6 +70,10 @@ const tlsKey = process.env.MINEDECK_TLS_KEY
 if (!!tlsCert !== !!tlsKey) throw new Error('Set both MINEDECK_TLS_CERT and MINEDECK_TLS_KEY to enable HTTPS')
 const tls = tlsCert && tlsKey ? { cert: await readFile(tlsCert), key: await readFile(tlsKey) } : undefined
 const app = Fastify({ logger: true, bodyLimit: MAX_FILE_BYTES + 64_000, https: tls ?? null })
+await app.register(fastifyMultipart, {
+  limits: { fileSize: MAX_UPLOAD_BYTES, files: MAX_UPLOAD_FILES, parts: MAX_UPLOAD_FILES },
+  throwFileSizeLimit: true,
+})
 const wss = new WebSocketServer({ noServer: true })
 const sessions = new Map<string, number>()
 const loginAttempts = new Map<string, { failures: number; blockedUntil: number }>()
@@ -232,6 +241,66 @@ app.put('/api/servers/:id/file', async (request) => {
     throw new InputError('File could not be opened safely')
   })
   try { await handle.writeFile(body.content, 'utf8') } finally { await handle.close() }
+  return { ok: true }
+})
+
+app.post('/api/servers/:id/files/upload', async (request) => {
+  if (!request.isMultipart()) throw new InputError('Uploads must use multipart form data')
+  const server = manager.get((request.params as { id: string }).id)
+  const requested = (request.query as { path?: unknown }).path ?? ''
+  if (typeof requested !== 'string') throw new InputError('Invalid path')
+  const directory = await resolveInside(server.directory, requested)
+  if (!(await stat(directory)).isDirectory()) throw new InputError('Path is not a directory')
+
+  const uploaded: string[] = []
+  for await (const part of request.files()) {
+    const name = validateUploadName(part.filename)
+    const relativePath = requested ? `${requested}/${name}` : name
+    const target = await resolveInside(server.directory, relativePath, true)
+    const exists = await lstat(target).then(() => true).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return false
+      throw error
+    })
+    if (exists) {
+      part.file.resume()
+      throw new InputError(`${name} already exists`, 409)
+    }
+
+    const temporary = join(directory, `.minedeck-upload-${randomBytes(12).toString('hex')}.tmp`)
+    try {
+      await pipeline(part.file, createWriteStream(temporary, { flags: 'wx', mode: 0o600 }))
+      if (part.file.truncated) throw new InputError(`${name} is larger than 512 MB`, 413)
+      await link(temporary, target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'EEXIST') throw new InputError(`${name} already exists`, 409)
+        throw error
+      })
+      await unlink(temporary)
+      uploaded.push(name)
+    } catch (error) {
+      await unlink(temporary).catch(() => undefined)
+      throw error
+    }
+  }
+  if (!uploaded.length) throw new InputError('Choose at least one file to upload')
+  return { uploaded }
+})
+
+app.delete('/api/servers/:id/file', async (request) => {
+  const server = manager.get((request.params as { id: string }).id)
+  const requested = (request.body as { path?: unknown } | null)?.path
+  if (typeof requested !== 'string' || !requested) throw new InputError('File path is required')
+  const path = await resolveInside(server.directory, requested)
+  if (!(await lstat(path)).isFile()) throw new InputError('Only files can be moved to the recycle bin')
+
+  await trash(path, { glob: false }).catch((error) => {
+    request.log.error(error, 'Could not move server file to the recycle bin')
+    throw new InputError('File could not be moved to the recycle bin', 500)
+  })
+  const stillExists = await lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return false
+    throw error
+  })
+  if (stillExists) throw new InputError('File could not be moved to the recycle bin', 500)
   return { ok: true }
 })
 
