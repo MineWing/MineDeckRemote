@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { access, realpath, stat } from 'node:fs/promises'
+import { access, readFile, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ServerConfig } from '../shared.ts'
@@ -73,6 +73,57 @@ export async function validateServerConfig(
     stopTimeoutSeconds: integer(body.stopTimeoutSeconds, 'Stop timeout', 5, 120),
     createdAt: existing?.createdAt ?? new Date().toISOString(),
   }
+}
+
+export async function importServerConfig(value: unknown): Promise<ServerConfig> {
+  if (!value || typeof value !== 'object') throw new InputError('Invalid server import')
+  const body = value as Record<string, unknown>
+  const directory = expandHome(text(body.directory, 'Directory', 1000))
+  if (!isAbsolute(directory)) throw new InputError('Directory must be an absolute path')
+
+  let contents: string
+  try {
+    contents = await readFile(await resolveInside(directory, 'start.bat'), 'utf8')
+  } catch {
+    throw new InputError('No readable start.bat was found in the server directory')
+  }
+
+  const lines = contents.replace(/\^\s*\r?\n/g, ' ').split(/\r?\n/)
+  let launch: { tokens: string[]; java: number; jar: number } | undefined
+  for (const line of lines) {
+    if (/^\s*(?:::|@?(?:echo|rem)(?:\s|$))/i.test(line)) continue
+    const tokens = [...line.matchAll(/(?:"[^"]*"|[^\s"]+)+/g)].map(([token]) => token.replace(/"([^"]*)"/g, '$1'))
+    const java = tokens.findIndex((token) => /(^|[\\/])java(?:\.exe)?$/i.test(token.replace(/^@/, '')))
+    const jar = tokens.findIndex((token, index) => index > java && token.toLowerCase() === '-jar')
+    if (java >= 0 && jar > java && tokens[jar + 1]) { launch = { tokens, java, jar }; break }
+  }
+  if (!launch) throw new InputError('start.bat must contain a Java command with -jar')
+
+  let minMemoryMb: number | undefined
+  let maxMemoryMb: number | undefined
+  const javaArgs: string[] = []
+  const factors: Record<string, number> = { '': 1 / 1_048_576, K: 1 / 1024, M: 1, G: 1024, T: 1_048_576 }
+  for (const argument of launch.tokens.slice(launch.java + 1, launch.jar)) {
+    if (!/^-Xm[sx]/i.test(argument)) { javaArgs.push(argument); continue }
+    const match = argument.match(/^-Xm([sx])(\d+)([KMGT]?)$/i)
+    if (!match) throw new InputError(`Unsupported memory setting in start.bat: ${argument}`)
+    const memoryMb = Math.round(Number(match[2]) * factors[match[3]!.toUpperCase()]!)
+    if (match[1]!.toLowerCase() === 's') minMemoryMb = memoryMb
+    else maxMemoryMb = memoryMb
+  }
+
+  const javaPath = launch.tokens[launch.java]!.replace(/^@/, '').replace(/%([^%]+)%/g, (token, name: string) => process.env[name] ?? token)
+  return validateServerConfig({
+    name: text(body.name, 'Name', 50),
+    directory,
+    jar: launch.tokens[launch.jar + 1],
+    javaPath,
+    minMemoryMb: minMemoryMb ?? Math.min(maxMemoryMb ?? 1024, 1024),
+    maxMemoryMb: maxMemoryMb ?? Math.max(minMemoryMb ?? 2048, 2048),
+    javaArgs,
+    autoRestart: true,
+    stopTimeoutSeconds: 30,
+  })
 }
 
 const isInside = (root: string, target: string) => {

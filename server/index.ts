@@ -8,7 +8,7 @@ import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import { promisify } from 'node:util'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { FileEntry, SocketEvent } from '../shared.ts'
-import { InputError, resolveInside, validateServerConfig } from './core.ts'
+import { importServerConfig, InputError, resolveInside, validateServerConfig } from './core.ts'
 import { ServerManager, type StoredData } from './manager.ts'
 
 const scryptAsync = promisify(scrypt)
@@ -160,6 +160,8 @@ app.post('/api/auth/password', async (request, reply) => {
 app.get('/api/servers', async () => manager.list())
 
 app.post('/api/servers', async (request) => manager.add(await validateServerConfig(request.body)))
+
+app.post('/api/servers/import', async (request) => manager.add(await importServerConfig(request.body)))
 
 app.put('/api/servers/:id', async (request) => {
   const { id } = request.params as { id: string }
