@@ -46,8 +46,11 @@ const formatSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1048
 
 function Logo({ compact = false }: { compact?: boolean }) {
   return <div className="flex items-center gap-3">
-    <div className={`${compact ? 'h-8 w-8 rounded-lg' : 'h-10 w-10 rounded-xl'} brand-cube shrink-0`} />
-    <div><div className={`${compact ? 'text-lg' : 'text-xl'} font-black tracking-tight text-white`}>MineDeck</div>{!compact && <div className="text-[10px] font-bold uppercase tracking-[.22em] text-deck-400">Server control</div>}</div>
+    <svg aria-hidden="true" viewBox="0 0 48 48" className={`${compact ? 'h-8 w-8' : 'h-10 w-10'} shrink-0 text-white drop-shadow-[0_0_12px_rgba(255,15,123,.35)]`}>
+      <path d="m27.2 14.1 6.1 4.1-16.9 25.1-6.1-4.1 16.9-25.1Z" fill="currentColor" />
+      <path d="M6.8 11.7C15.4 4.1 29.8 3.6 41.3 12l-3.5 5.1c-8.2-5.7-17.5-6-25.9-.2l-5.1-5.2Z" fill="currentColor" />
+    </svg>
+    <div className="leading-none"><div className={`${compact ? 'text-lg' : 'text-xl'} font-black tracking-tight text-white`}>MINEDECK</div><div className={`${compact ? 'mt-0.5 text-[8px]' : 'mt-1 text-[10px]'} bg-gradient-to-r from-[#ff0f7b] to-[#f89b29] bg-clip-text font-black tracking-[.3em] text-transparent`}>REMOTE</div></div>
   </div>
 }
 
