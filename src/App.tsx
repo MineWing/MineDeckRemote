@@ -35,6 +35,7 @@ export function statusNotification(server: Pick<ServerView, 'name' | 'status' | 
 }
 
 const prettyStatus = (status: ServerStatus) => status.charAt(0).toUpperCase() + status.slice(1)
+const tabs = ['console', 'files', 'configuration'] as const
 const formatUptime = (seconds: number) => {
   if (!seconds) return '—'
   const days = Math.floor(seconds / 86400)
@@ -275,7 +276,7 @@ function PasswordForm({ onClose }: { onClose: () => void }) {
 function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [servers, setServers] = useState<ServerView[]>([])
   const [selectedId, setSelectedId] = useState('')
-  const [tab, setTab] = useState<'console' | 'files' | 'configuration'>('console')
+  const [tab, setTab] = useState<(typeof tabs)[number]>('console')
   const [logs, setLogs] = useState<Record<string, string[]>>({})
   const [connected, setConnected] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
@@ -293,7 +294,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   }
 
   useEffect(() => {
-    void api<ServerView[]>('/api/servers').then((items) => { statuses.current = new Map(items.map((server) => [server.id, server.status])); setServers(items); setSelectedId((id) => id || items[0]?.id || '') }).catch((reason) => setError(reason.message))
+    void api<ServerView[]>('/api/servers').then((items) => { statuses.current = new Map(items.map((server) => [server.id, server.status])); setServers(items) }).catch((reason) => setError(reason.message))
   }, [])
   useEffect(() => {
     if (!selectedId || logs[selectedId]) return
@@ -319,7 +320,6 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           }
           statuses.current = new Map(event.servers.map((server) => [server.id, server.status]))
           setServers(event.servers)
-          setSelectedId((id) => id || event.servers[0]?.id || '')
         } else setLogs((current) => ({ ...current, [event.serverId]: [...(current[event.serverId] ?? []), event.line].slice(-800) }))
       }
       socket.onclose = () => { setConnected(false); if (active) retry = window.setTimeout(connect, 2_000) }
@@ -343,7 +343,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const logout = async () => { await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined); onLogout() }
   const remove = async () => {
     if (!selected || !confirm(`Remove ${selected.name} from MineDeck? Server files will not be deleted.`)) return
-    try { await api(`/api/servers/${selected.id}`, { method: 'DELETE' }); setSelectedId(servers.find((item) => item.id !== selected.id)?.id ?? '') }
+    try { await api(`/api/servers/${selected.id}`, { method: 'DELETE' }); setSelectedId('') }
     catch (reason) { setError((reason as Error).message) }
   }
   const select = (id: string) => { setSelectedId(id); setTab('console'); setError('') }
@@ -352,14 +352,12 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-zinc-800/80 bg-zinc-950 lg:flex">
       <div className="border-b border-zinc-800/80 p-5"><Logo /></div>
-      <div className="flex items-center justify-between px-5 pb-2 pt-5"><span className="text-[11px] font-bold uppercase tracking-[.18em] text-zinc-600">Your servers</span><span className="rounded-full bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-500">{servers.length}</span></div>
-      <nav className="flex-1 overflow-auto p-3">
-        {servers.map((server) => <button key={server.id} onClick={() => select(server.id)} className={`mb-1 flex w-full items-center gap-3 rounded-xl border px-3 py-3 text-left transition ${server.id === selectedId ? 'border-zinc-700 bg-zinc-800/80' : 'border-transparent hover:bg-zinc-900'}`}>
-          <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusStyle[server.status]} ${server.status === 'running' ? 'shadow-[0_0_10px_#a3e635]' : ''}`} />
-          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-zinc-200">{server.name}</span><span className="text-xs text-zinc-600">{prettyStatus(server.status)}</span></span>
-          <span className="text-zinc-700">›</span>
-        </button>)}
-        {!servers.length && <p className="px-3 py-8 text-center text-sm leading-6 text-zinc-600">No servers yet.<br />Add your first one below.</p>}
+      <div className="border-b border-zinc-800/80 p-4">
+        {selected ? <div className="rounded-xl bg-zinc-900 p-3"><div className="flex items-center gap-3"><span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusStyle[selected.status]}`} /><div className="min-w-0 flex-1"><div className="truncate text-sm font-semibold text-white">{selected.name}</div><div className="text-xs text-zinc-500">{prettyStatus(selected.status)}</div></div></div><button className="mt-3 w-full rounded-lg py-2 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-white" onClick={() => select('')}>Change server</button></div> : <div className="rounded-xl border border-dashed border-zinc-800 px-3 py-4 text-center text-sm text-zinc-600">Select a server to continue</div>}
+      </div>
+      <nav className="flex-1 p-3">
+        <div className="flex items-center justify-between px-3 pb-2 pt-1"><span className="text-[11px] font-bold uppercase tracking-[.18em] text-zinc-600">Server</span><span className={`flex items-center gap-1.5 text-[11px] ${connected ? 'text-zinc-600' : 'text-amber-400'}`}><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-deck-500' : 'bg-amber-400'}`} />{connected ? 'Live' : 'Reconnecting'}</span></div>
+        {tabs.map((item) => <button key={item} disabled={!selected} onClick={() => setTab(item)} className={`mb-1 flex w-full items-center rounded-xl border px-4 py-3 text-left text-sm font-semibold capitalize transition ${tab === item && selected ? 'border-zinc-700 bg-zinc-800/80 text-white' : 'border-transparent text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300'}`}>{item}</button>)}
       </nav>
       <div className="space-y-2 border-t border-zinc-800/80 p-3"><button className="btn-primary w-full" onClick={() => setAddOpen(true)}>＋ Add server</button><div className="grid grid-cols-2 gap-2"><button className="rounded-lg py-2 text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300" onClick={() => setPasswordOpen(true)}>Password</button><button className="rounded-lg py-2 text-xs text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300" onClick={() => void logout()}>Sign out</button></div></div>
     </aside>
@@ -384,14 +382,14 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           <Metric label="Players" value={String(selected.onlinePlayers)} detail="Currently online" />
           <Metric label="Crashes" value={String(selected.crashCount)} detail={selected.lastCrashAt ? new Date(selected.lastCrashAt).toLocaleDateString() : 'None recorded'} className="col-span-2 md:col-span-1" />
         </div>
-        <div className="mb-4 flex items-center justify-between border-b border-zinc-800">
-          <div className="flex overflow-auto">{(['console', 'files', 'configuration'] as const).map((item) => <button key={item} className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize transition ${tab === item ? 'border-deck-400 text-white' : 'border-transparent text-zinc-500 hover:text-zinc-300'}`} onClick={() => setTab(item)}>{item}</button>)}</div>
+        <div className="mb-4 flex items-center justify-between border-b border-zinc-800 lg:hidden">
+          <div className="flex overflow-auto">{tabs.map((item) => <button key={item} className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize transition ${tab === item ? 'border-deck-400 text-white' : 'border-transparent text-zinc-500 hover:text-zinc-300'}`} onClick={() => setTab(item)}>{item}</button>)}</div>
           <span className={`hidden items-center gap-1.5 text-xs sm:flex ${connected ? 'text-zinc-600' : 'text-amber-400'}`}><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-deck-500' : 'bg-amber-400'}`} />{connected ? 'Live' : 'Reconnecting'}</span>
         </div>
         {tab === 'console' && <Console server={selected} lines={logs[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
         {tab === 'files' && <Files server={selected} />}
         {tab === 'configuration' && <div className="panel overflow-hidden"><div className="border-b border-zinc-800 px-5 py-4"><h2 className="font-bold text-white">Server configuration</h2><p className="mt-1 text-xs text-zinc-500">Stop the server before changing launch settings.</p></div><ServerForm server={selected} onSaved={(saved) => setServers((items) => items.map((item) => item.id === saved.id ? saved : item))} onDelete={() => void remove()} /></div>}
-      </div> : <div className="flex min-h-screen items-center justify-center p-6"><div className="max-w-sm text-center"><div className="brand-cube mx-auto h-16 w-16 rounded-2xl" /><h1 className="mt-6 text-2xl font-bold text-white">Add your first server</h1><p className="mt-2 text-sm leading-6 text-zinc-500">Point MineDeck at an existing Minecraft server folder to manage it from this dashboard.</p><button className="btn-primary mt-6" onClick={() => setAddOpen(true)}>＋ Add server</button><button className="mt-6 block w-full text-xs text-zinc-600 hover:text-zinc-400 lg:hidden" onClick={() => void logout()}>Sign out</button></div></div>}
+      </div> : servers.length ? <div className="mx-auto max-w-5xl p-6 sm:p-10 lg:p-14"><div className="flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl font-black tracking-tight text-white">Select a server</h1><p className="mt-2 text-sm text-zinc-500">Choose a server before opening its console, files, or configuration.</p></div><button className="btn-primary" onClick={() => setAddOpen(true)}>＋ Add server</button></div><div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{servers.map((server) => <button key={server.id} onClick={() => select(server.id)} className="panel flex items-center gap-4 p-5 text-left transition hover:border-zinc-600 hover:bg-zinc-800/70"><span className={`h-3 w-3 shrink-0 rounded-full ${statusStyle[server.status]} ${server.status === 'running' ? 'shadow-[0_0_10px_#a3e635]' : ''}`} /><span className="min-w-0 flex-1"><span className="block truncate font-bold text-white">{server.name}</span><span className="mt-1 block text-xs text-zinc-500">{prettyStatus(server.status)}</span></span><span className="text-xl text-zinc-600">›</span></button>)}</div></div> : <div className="flex min-h-screen items-center justify-center p-6"><div className="max-w-sm text-center"><div className="brand-cube mx-auto h-16 w-16 rounded-2xl" /><h1 className="mt-6 text-2xl font-bold text-white">Add your first server</h1><p className="mt-2 text-sm leading-6 text-zinc-500">Point MineDeck at an existing Minecraft server folder to manage it from this dashboard.</p><button className="btn-primary mt-6" onClick={() => setAddOpen(true)}>＋ Add server</button><button className="mt-6 block w-full text-xs text-zinc-600 hover:text-zinc-400 lg:hidden" onClick={() => void logout()}>Sign out</button></div></div>}
     </main>
     {addOpen && <Modal title="Add Minecraft server" onClose={() => setAddOpen(false)}><ServerForm onCancel={() => setAddOpen(false)} onSaved={(server) => { setServers((items) => [...items, server]); setSelectedId(server.id); setAddOpen(false) }} /></Modal>}
     {passwordOpen && <Modal title="Change admin password" onClose={() => setPasswordOpen(false)}><PasswordForm onClose={() => setPasswordOpen(false)} /><div className="border-t border-zinc-800 px-5 py-4 text-center lg:hidden"><button className="text-sm text-red-400" onClick={() => void logout()}>Sign out of MineDeck</button></div></Modal>}
