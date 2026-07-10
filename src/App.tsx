@@ -10,14 +10,15 @@ import { toml } from '@codemirror/legacy-modes/mode/toml'
 import type { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
-import { KeyRound, LogOut, Play, Plus, RotateCcw, Save, Send, Settings, Square, Trash2, Upload, X, Zap } from 'lucide-react'
+import { Ban, Copy, KeyRound, LogOut, Play, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shield, ShieldOff, Square, Trash2, Upload, Users, UserX, X, Zap } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import type { FileEntry, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
+import { consoleLineTokens } from '@/lib/console'
+import type { FileEntry, PlayerAction, PlayerView, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
@@ -66,7 +67,7 @@ const browserPlatform = () => {
 }
 
 const prettyStatus = (status: ServerStatus) => status.charAt(0).toUpperCase() + status.slice(1)
-const tabs = ['console', 'files', 'configuration'] as const
+const tabs = ['console', 'players', 'files', 'configuration'] as const
 const formatUptime = (seconds: number) => {
   if (!seconds) return '—'
   const days = Math.floor(seconds / 86400)
@@ -75,6 +76,26 @@ const formatUptime = (seconds: number) => {
   return days ? `${days}d ${hours}h` : hours ? `${hours}h ${minutes}m` : `${minutes}m ${seconds % 60}s`
 }
 const formatSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`
+
+const METRIC_WINDOW_MS = 5 * 60_000
+const METRIC_SAMPLE_INTERVAL_MS = 1_500
+interface MetricSample { at: number; cpuPercent: number; memoryMb: number }
+type MetricHistory = Record<string, MetricSample[]>
+
+export function appendMetricHistory(current: MetricHistory, servers: ServerView[], now = Date.now()): MetricHistory {
+  const liveIds = new Set(servers.map((server) => server.id))
+  const next: MetricHistory = {}
+  for (const server of servers) {
+    const samples = (current[server.id] ?? []).filter((sample) => sample.at >= now - METRIC_WINDOW_MS)
+    const sample = { at: now, cpuPercent: server.cpuPercent, memoryMb: server.memoryMb }
+    const previous = samples.at(-1)
+    next[server.id] = previous && now - previous.at < METRIC_SAMPLE_INTERVAL_MS
+      ? [...samples.slice(0, -1), { ...sample, at: previous.at }]
+      : [...samples, sample]
+  }
+  for (const id of Object.keys(current)) if (!liveIds.has(id)) delete next[id]
+  return next
+}
 
 function Logo({ compact = false }: { compact?: boolean }) {
   return <div className="flex items-center gap-3">
@@ -209,7 +230,7 @@ function ServerForm({ server, onSaved, onCancel, onDelete }: { server?: ServerVi
   </form>
 }
 
-function Console({ server, lines, onCommand }: { server: ServerView; lines: string[]; onCommand: (command: string) => Promise<void> }) {
+function Console({ server, lines, samples, onCommand }: { server: ServerView; lines: string[]; samples: MetricSample[]; onCommand: (command: string) => Promise<void> }) {
   const [command, setCommand] = useState('')
   const [error, setError] = useState('')
   const end = useRef<HTMLDivElement>(null)
@@ -222,17 +243,71 @@ function Console({ server, lines, onCommand }: { server: ServerView; lines: stri
     try { await onCommand(value) } catch (reason) { setError((reason as Error).message); setCommand(value) }
   }
   const running = server.status === 'running' || server.status === 'starting'
-  return <section className="panel overflow-hidden">
-    <div className="flex items-center justify-between border-b border-border px-4 py-3"><span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><span className={`h-2 w-2 rounded-full ${running ? 'bg-chart-2 shadow-[0_0_8px_#50fa7b]' : 'bg-muted-foreground'}`} />Live console</span><Button variant="ghost" size="xs" onClick={() => navigator.clipboard.writeText(lines.join('\n'))}>Copy output</Button></div>
-    <div className="console-lines h-[48vh] min-h-80 overflow-auto bg-sidebar py-3 font-mono text-[12px] leading-5 text-foreground sm:text-[13px]">
-      {!lines.length && <div data-line="" className="px-3 text-muted-foreground">Console output will appear here.</div>}
-      {lines.map((line, index) => <div key={`${index}-${line}`} data-line={index + 1} className={`whitespace-pre-wrap break-all px-3 hover:bg-white/[.025] ${line.startsWith('MineDeck:') ? 'text-primary' : line.startsWith('>') ? 'text-chart-5' : ''}`}>{line}</div>)}
-      <div ref={end} />
+  return <div className="space-y-4">
+    <section className="panel overflow-hidden">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3"><span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><span className={`h-2 w-2 rounded-full ${running ? 'bg-chart-2 shadow-[0_0_8px_#50fa7b]' : 'bg-muted-foreground'}`} />Live console</span><Button variant="ghost" size="xs" onClick={() => navigator.clipboard.writeText(lines.join('\n'))}>Copy output</Button></div>
+      <div className="console-lines h-[48vh] min-h-80 overflow-auto bg-sidebar py-3 font-mono text-[12px] leading-5 text-foreground sm:text-[13px]">
+        {!lines.length && <div data-line="" className="px-3 text-muted-foreground">Console output will appear here.</div>}
+        {lines.map((line, index) => <div key={`${index}-${line}`} data-line={index + 1} className="whitespace-pre-wrap break-all px-3 hover:bg-white/[.025]">{consoleLineTokens(line).map((token, tokenIndex) => <span key={tokenIndex} className={token.className}>{token.text}</span>)}</div>)}
+        <div ref={end} />
+      </div>
+      <form onSubmit={submit} className="border-t border-border bg-card p-3">
+        <div className="flex gap-2"><span className="flex items-center font-mono font-bold text-primary">›</span><Input className="h-10 flex-1 font-mono" aria-label="Console command" placeholder={running ? 'Enter a Minecraft command…' : 'Start the server to send commands'} disabled={!running} value={command} onChange={(event) => setCommand(event.target.value)} /><Button size="lg" disabled={!running}><Send />Send</Button></div>
+        {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
+      </form>
+    </section>
+    <div className="grid gap-4 md:grid-cols-2" aria-label="Server resource usage">
+      <ResourceChart title="CPU" value={`${server.cpuPercent.toFixed(1)}%`} samples={samples} getValue={(sample) => sample.cpuPercent} minimumMax={100} formatScale={(value) => `${Math.round(value)}%`} color="text-chart-4" />
+      <ResourceChart title="RAM" value={`${server.memoryMb.toLocaleString()} MB`} detail={`of ${server.maxMemoryMb.toLocaleString()} MB`} samples={samples} getValue={(sample) => sample.memoryMb} minimumMax={server.maxMemoryMb} formatScale={(value) => `${Math.round(value).toLocaleString()} MB`} color="text-chart-5" />
     </div>
-    <form onSubmit={submit} className="border-t border-border bg-card p-3">
-      <div className="flex gap-2"><span className="flex items-center font-mono font-bold text-primary">›</span><Input className="h-10 flex-1 font-mono" aria-label="Console command" placeholder={running ? 'Enter a Minecraft command…' : 'Start the server to send commands'} disabled={!running} value={command} onChange={(event) => setCommand(event.target.value)} /><Button size="lg" disabled={!running}><Send />Send</Button></div>
-      {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
-    </form>
+  </div>
+}
+
+function ResourceChart({ title, value, detail = 'Java process', samples, getValue, minimumMax, formatScale, color }: {
+  title: string
+  value: string
+  detail?: string
+  samples: MetricSample[]
+  getValue: (sample: MetricSample) => number
+  minimumMax: number
+  formatScale: (value: number) => string
+  color: string
+}) {
+  const width = 600
+  const height = 180
+  const plot = { left: 12, right: 588, top: 12, bottom: 148 }
+  const now = Date.now()
+  const visible = samples.filter((sample) => sample.at >= now - METRIC_WINDOW_MS)
+  const rawMax = Math.max(minimumMax, ...visible.map(getValue), 1)
+  const step = title === 'CPU' ? 25 : 256
+  const max = Math.ceil(rawMax / step) * step
+  const points = visible.map((sample) => ({
+    x: plot.left + Math.max(0, Math.min(1, (sample.at - (now - METRIC_WINDOW_MS)) / METRIC_WINDOW_MS)) * (plot.right - plot.left),
+    y: plot.bottom - Math.max(0, Math.min(1, getValue(sample) / max)) * (plot.bottom - plot.top),
+  }))
+  const line = points.map((point, index) => `${index ? 'L' : 'M'} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(' ')
+  const area = points.length ? `${line} L ${points.at(-1)!.x.toFixed(1)} ${plot.bottom} L ${points[0]!.x.toFixed(1)} ${plot.bottom} Z` : ''
+  const latest = points.at(-1)
+
+  return <section className="panel overflow-hidden">
+    <div className="flex items-start justify-between gap-4 border-b border-border px-4 py-3">
+      <div><h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">{title} usage</h2><p className="mt-1 text-xs text-muted-foreground">{detail}</p></div>
+      <div className={`text-right text-xl font-bold tabular-nums ${color}`}>{value}</div>
+    </div>
+    <div className="relative px-3 pb-3 pt-2">
+      <svg viewBox={`0 0 ${width} ${height}`} className={`block h-44 w-full ${color}`} role="img" aria-label={`${title} usage over the last five minutes`}>
+        <title>{title} usage over the last five minutes</title>
+        {[plot.top, (plot.top + plot.bottom) / 2, plot.bottom].map((y) => <line key={y} x1={plot.left} x2={plot.right} y1={y} y2={y} className="text-border" stroke="currentColor" strokeWidth="1" vectorEffect="non-scaling-stroke" />)}
+        {area && <path d={area} fill="currentColor" opacity="0.12" />}
+        {line && <path d={line} fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />}
+        {latest && <circle cx={latest.x} cy={latest.y} r="3.5" fill="currentColor" stroke="var(--card)" strokeWidth="2" vectorEffect="non-scaling-stroke" />}
+        <text x={plot.left} y="173" fill="var(--muted-foreground)" fontSize="11">5 minutes ago</text>
+        <text x={plot.right} y="173" fill="var(--muted-foreground)" fontSize="11" textAnchor="end">Now</text>
+        <text x={plot.right - 2} y={plot.top + 11} fill="var(--muted-foreground)" fontSize="11" textAnchor="end">{formatScale(max)}</text>
+        <text x={plot.right - 2} y={plot.bottom - 5} fill="var(--muted-foreground)" fontSize="11" textAnchor="end">0</text>
+      </svg>
+      {!visible.length && <div className="pointer-events-none absolute inset-x-3 top-2 flex h-36 items-center justify-center text-xs text-muted-foreground">Waiting for metrics…</div>}
+    </div>
   </section>
 }
 
@@ -450,6 +525,108 @@ function Files({ server }: { server: ServerView }) {
   </section>
 }
 
+const playerHeadUrl = (uuid: string) => `https://crafatar.com/avatars/${uuid.replaceAll('-', '')}?size=96&overlay&default=MHF_Steve`
+
+function Players({ server }: { server: ServerView }) {
+  const [players, setPlayers] = useState<PlayerView[]>([])
+  const [selectedUuid, setSelectedUuid] = useState('')
+  const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<PlayerAction | ''>('')
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const selected = players.find((player) => player.uuid === selectedUuid)
+  const filtered = useMemo(() => {
+    const value = query.trim().toLowerCase()
+    return value ? players.filter((player) => player.username.toLowerCase().includes(value) || player.uuid.includes(value)) : players
+  }, [players, query])
+
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const result = await api<PlayerView[]>(`/api/servers/${server.id}/players`)
+      setPlayers(result)
+      setError('')
+    } catch (reason) { setError((reason as Error).message) }
+    finally { if (!silent) setLoading(false) }
+  }
+
+  useEffect(() => {
+    setPlayers([]); setSelectedUuid(''); setQuery(''); setError(''); setNotice(''); setLoading(true)
+    void load()
+    const timer = window.setInterval(() => void load(true), 5_000)
+    return () => window.clearInterval(timer)
+  }, [server.id])
+
+  const run = async (action: PlayerAction) => {
+    if (!selected) return
+    setBusy(action); setError(''); setNotice('')
+    try {
+      await api(`/api/servers/${server.id}/players/${encodeURIComponent(selected.uuid)}/actions/${action}`, { method: 'POST' })
+      setPlayers((items) => items.map((player) => player.uuid !== selected.uuid ? player : {
+        ...player,
+        isOp: action === 'op' ? true : action === 'deop' ? false : player.isOp,
+        isWhitelisted: action === 'remove-whitelist' ? false : player.isWhitelisted,
+        isOnline: action === 'kick' || action === 'ban' ? false : player.isOnline,
+        isBanned: action === 'ban' ? true : player.isBanned,
+      }))
+      const labels: Record<PlayerAction, string> = {
+        op: `${selected.username} is now an operator.`,
+        deop: `Operator access removed from ${selected.username}.`,
+        'remove-whitelist': `${selected.username} was removed from the whitelist.`,
+        kick: `${selected.username} was kicked.`,
+        ban: `${selected.username} was banned.`,
+      }
+      setNotice(labels[action])
+      window.setTimeout(() => void load(true), 1_000)
+    } catch (reason) { setError((reason as Error).message) }
+    finally { setBusy('') }
+  }
+
+  const running = server.status === 'running'
+  return <>
+    <section className="panel overflow-hidden" aria-busy={loading}>
+      <div className="flex flex-col gap-3 border-b border-border bg-card/70 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div><h2 className="flex items-center gap-2 font-bold text-card-foreground"><Users className="size-4 text-primary" />Players</h2><p className="mt-1 text-xs text-muted-foreground">{players.length} known · {players.filter((player) => player.isOnline).length} online</p></div>
+        <div className="flex gap-2">
+          <label className="relative min-w-0 flex-1 sm:w-64"><Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input className="pl-9" aria-label="Search players" placeholder="Search username or UUID" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
+          <Button variant="outline" size="icon" disabled={loading} onClick={() => void load()} aria-label="Refresh players"><RefreshCw className={loading ? 'animate-spin' : ''} /></Button>
+        </div>
+      </div>
+      {!running && <div className="border-b border-chart-3/30 bg-chart-3/10 px-4 py-2.5 text-sm text-chart-3">Start the server to change player access, kick, or ban.</div>}
+      {error && !selected && <div role="alert" className="border-b border-destructive/40 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">{error}</div>}
+      <div className="p-4 sm:p-5">
+        {loading && !players.length ? <div className="grid min-h-64 place-items-center text-sm text-muted-foreground"><span className="flex items-center gap-2"><RefreshCw className="size-4 animate-spin" />Loading players…</span></div>
+          : !filtered.length ? <div className="grid min-h-64 place-items-center px-5 text-center"><div><Users className="mx-auto size-10 text-muted-foreground/60" /><p className="mt-4 text-sm font-semibold text-foreground">{query ? 'No matching players' : 'No players found'}</p><p className="mt-1 max-w-sm text-xs leading-5 text-muted-foreground">{query ? 'Try a different username or UUID.' : 'Players will appear after they have joined this Java server at least once.'}</p></div></div>
+            : <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{filtered.map((player) => <button key={player.uuid} onClick={() => { setSelectedUuid(player.uuid); setError(''); setNotice('') }} className="group flex min-w-0 items-center gap-4 rounded-xl border border-border bg-muted/20 p-3.5 text-left transition hover:border-primary/50 hover:bg-primary/5 focus-visible:ring-3 focus-visible:ring-ring/50">
+              <div className="relative shrink-0"><img src={playerHeadUrl(player.uuid)} alt="" width="64" height="64" loading="lazy" className="h-16 w-16 rounded-lg bg-muted [image-rendering:pixelated]" /><span className={`absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full border-2 border-card ${player.isOnline ? 'bg-chart-2 shadow-[0_0_8px_#50fa7b]' : 'bg-muted-foreground'}`} /></div>
+              <span className="min-w-0 flex-1"><span className="block truncate font-bold text-card-foreground group-hover:text-primary">{player.username}</span><span className="mt-1 block truncate font-mono text-[10px] text-muted-foreground">{player.uuid}</span><span className="mt-2 flex flex-wrap gap-1.5">{player.isOnline && <Badge className="bg-chart-2/15 text-chart-2">Online</Badge>}{player.isOp && <Badge variant="outline" className="border-primary/30 text-primary">OP</Badge>}{player.isWhitelisted && <Badge variant="outline">Whitelisted</Badge>}{player.isBanned && <Badge variant="destructive">Banned</Badge>}</span></span>
+              <span className="text-lg text-muted-foreground transition group-hover:translate-x-0.5 group-hover:text-primary">›</span>
+            </button>)}</div>}
+      </div>
+      <div className="border-t border-border bg-muted/20 px-4 py-2 text-right text-[10px] text-muted-foreground">Player heads by <a className="text-primary hover:underline" href="https://crafatar.com" target="_blank" rel="noreferrer">Crafatar</a></div>
+    </section>
+
+    {selected && <Modal title={`Manage ${selected.username}`} onClose={() => { setSelectedUuid(''); setError(''); setNotice('') }}>
+      <div className="p-5 sm:p-6">
+        <div className="flex items-center gap-4"><img src={playerHeadUrl(selected.uuid)} alt={`${selected.username}'s Minecraft head`} width="80" height="80" className="h-20 w-20 rounded-xl bg-muted [image-rendering:pixelated]" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate text-xl font-black text-popover-foreground">{selected.username}</h3><Badge variant="outline" className="gap-1.5"><span className={`h-1.5 w-1.5 rounded-full ${selected.isOnline ? 'bg-chart-2' : 'bg-muted-foreground'}`} />{selected.isOnline ? 'Online' : 'Offline'}</Badge></div><div className="mt-2 flex min-w-0 items-center gap-1.5"><code className="truncate text-xs text-muted-foreground">{selected.uuid}</code><Button variant="ghost" size="icon-xs" onClick={() => void navigator.clipboard.writeText(selected.uuid)} aria-label="Copy UUID"><Copy /></Button></div></div></div>
+
+        <div className="mt-6 flex flex-wrap gap-2">{selected.isOp && <Badge variant="outline" className="border-primary/30 text-primary">Operator</Badge>}{selected.isWhitelisted && <Badge variant="outline">Whitelisted</Badge>}{selected.isBanned && <Badge variant="destructive">Banned</Badge>}{!selected.isOp && !selected.isWhitelisted && !selected.isBanned && <span className="text-xs text-muted-foreground">No special access</span>}</div>
+        {notice && <Alert className="mt-5 border-chart-2/30 bg-chart-2/10 text-chart-2"><AlertDescription>{notice}</AlertDescription></Alert>}
+        {error && <Alert variant="destructive" className="mt-5"><AlertDescription>{error}</AlertDescription></Alert>}
+
+        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+          <Button variant="outline" className="h-auto justify-start px-4 py-3 text-left" disabled={!running || Boolean(busy)} onClick={() => void run(selected.isOp ? 'deop' : 'op')}>{selected.isOp ? <ShieldOff /> : <Shield />}<span><span className="block">{selected.isOp ? 'Remove OP' : 'Make operator'}</span><span className="mt-0.5 block text-[11px] font-normal text-muted-foreground">{selected.isOp ? 'Revoke operator commands' : 'Grant full operator commands'}</span></span></Button>
+          <Button variant="outline" className="h-auto justify-start px-4 py-3 text-left" disabled={!running || !selected.isWhitelisted || Boolean(busy)} onClick={() => void run('remove-whitelist')}><UserX /><span><span className="block">{selected.isWhitelisted ? 'Remove whitelist' : 'Not whitelisted'}</span><span className="mt-0.5 block text-[11px] font-normal text-muted-foreground">Remove server whitelist access</span></span></Button>
+          <Button variant="outline" className="h-auto justify-start px-4 py-3 text-left" disabled={!running || !selected.isOnline || Boolean(busy)} onClick={() => void run('kick')}><UserX /><span><span className="block">Kick player</span><span className="mt-0.5 block text-[11px] font-normal text-muted-foreground">Disconnect from this session</span></span></Button>
+          <Button variant="destructive" className="h-auto justify-start px-4 py-3 text-left" disabled={!running || selected.isBanned || Boolean(busy)} onClick={() => confirm(`Ban ${selected.username} from this server?`) && void run('ban')}><Ban /><span><span className="block">{selected.isBanned ? 'Already banned' : 'Ban player'}</span><span className="mt-0.5 block text-[11px] font-normal opacity-75">Prevent future connections</span></span></Button>
+        </div>
+        {busy && <p className="mt-4 flex items-center justify-center gap-2 text-xs text-muted-foreground"><RefreshCw className="size-3 animate-spin" />Applying player action…</p>}
+      </div>
+    </Modal>}
+  </>
+}
+
 function PasswordForm({ onClose }: { onClose: () => void }) {
   const [currentPassword, setCurrent] = useState('')
   const [newPassword, setNext] = useState('')
@@ -473,6 +650,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   const [selectedId, setSelectedId] = useState('')
   const [tab, setTab] = useState<(typeof tabs)[number]>('console')
   const [logs, setLogs] = useState<Record<string, string[]>>({})
+  const [metricHistory, setMetricHistory] = useState<MetricHistory>({})
   const [connected, setConnected] = useState(false)
   const [addOpen, setAddOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
@@ -489,7 +667,11 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
   }
 
   useEffect(() => {
-    void api<ServerView[]>('/api/servers').then((items) => { statuses.current = new Map(items.map((server) => [server.id, server.status])); setServers(items) }).catch((reason) => setError(reason.message))
+    void api<ServerView[]>('/api/servers').then((items) => {
+      statuses.current = new Map(items.map((server) => [server.id, server.status]))
+      setServers(items)
+      setMetricHistory((current) => appendMetricHistory(current, items))
+    }).catch((reason) => setError(reason.message))
   }, [])
   useEffect(() => {
     if (!selectedId || logs[selectedId]) return
@@ -515,6 +697,7 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           }
           statuses.current = new Map(event.servers.map((server) => [server.id, server.status]))
           setServers(event.servers)
+          setMetricHistory((current) => appendMetricHistory(current, event.servers))
         } else setLogs((current) => ({ ...current, [event.serverId]: [...(current[event.serverId] ?? []), event.line].slice(-800) }))
       }
       socket.onclose = () => { setConnected(false); if (active) retry = window.setTimeout(connect, 2_000) }
@@ -581,7 +764,8 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           <div className="flex overflow-auto">{tabs.map((item) => <button key={item} className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize transition ${tab === item ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setTab(item)}>{item}</button>)}</div>
           <span className={`hidden items-center gap-1.5 text-xs sm:flex ${connected ? 'text-muted-foreground' : 'text-chart-3'}`}><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-chart-2' : 'bg-chart-3'}`} />{connected ? 'Live' : 'Reconnecting'}</span>
         </div>
-        {tab === 'console' && <Console server={selected} lines={logs[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
+        {tab === 'console' && <Console server={selected} lines={logs[selected.id] ?? []} samples={metricHistory[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
+        {tab === 'players' && <Players server={selected} />}
         {tab === 'files' && <Files server={selected} />}
         {tab === 'configuration' && <Card className="gap-0 overflow-hidden py-0"><div className="border-b border-border px-5 py-4"><h2 className="font-bold text-card-foreground">Server configuration</h2><p className="mt-1 text-xs text-muted-foreground">Stop the server before changing launch settings.</p></div><ServerForm server={selected} onSaved={(saved) => setServers((items) => items.map((item) => item.id === saved.id ? saved : item))} onDelete={() => void remove()} /></Card>}
       </div> : servers.length ? <div className="mx-auto max-w-5xl p-6 sm:p-10 lg:p-14"><div className="flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl font-black tracking-tight text-foreground">Select a server</h1><p className="mt-2 text-sm text-muted-foreground">Choose a server before opening its console, files, or configuration.</p></div><Button onClick={() => setAddOpen(true)}><Plus />Add server</Button></div><div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{servers.map((server) => <button key={server.id} onClick={() => select(server.id)} className="panel flex items-center gap-4 p-5 text-left transition hover:border-primary/50 hover:bg-muted/50"><span className={`h-3 w-3 shrink-0 rounded-full ${statusStyle[server.status]} ${server.status === 'running' ? 'shadow-[0_0_10px_#50fa7b]' : ''}`} /><span className="min-w-0 flex-1"><span className="block truncate font-bold text-card-foreground">{server.name}</span><span className="mt-1 block text-xs text-muted-foreground">{prettyStatus(server.status)}</span></span><span className="text-xl text-muted-foreground">›</span></button>)}</div></div> : <div className="flex min-h-screen items-center justify-center p-6"><div className="max-w-sm text-center"><div className="brand-cube mx-auto h-16 w-16 rounded-2xl" /><h1 className="mt-6 text-2xl font-bold text-foreground">Add your first server</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">Point MineDeck at an existing Minecraft server folder to manage it from this dashboard.</p><Button className="mt-6" size="lg" onClick={() => setAddOpen(true)}><Plus />Add server</Button><Button variant="ghost" className="mt-6 w-full lg:hidden" size="sm" onClick={() => void logout()}><LogOut />Sign out</Button></div></div>}

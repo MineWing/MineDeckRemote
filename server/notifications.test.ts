@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { serverFormDisabled, shortcutLabel, statusNotification, usesAppleShortcutKeys } from '../src/App.tsx'
+import { appendMetricHistory, serverFormDisabled, shortcutLabel, statusNotification, usesAppleShortcutKeys } from '../src/App.tsx'
+import type { ServerView } from '../shared.ts'
 
 test('server lifecycle notifications describe starts, restarts, stops, and crashes', () => {
   const server = { name: 'Survival', status: 'starting' as const, autoRestart: true }
@@ -25,4 +26,15 @@ test('editor shortcut labels follow the browser platform', () => {
   assert.equal(shortcutLabel('s', 'macOS'), '⌘S')
   assert.equal(shortcutLabel('s', 'Win32'), 'Ctrl+S')
   assert.equal(shortcutLabel('f', 'Linux x86_64'), 'Ctrl+F')
+})
+
+test('resource history samples live metrics without duplicating rapid updates', () => {
+  const server = { id: 'survival', cpuPercent: 12.5, memoryMb: 768 } as ServerView
+  const initial = appendMetricHistory({}, [server], 10_000)
+  const rapid = appendMetricHistory(initial, [{ ...server, cpuPercent: 20, memoryMb: 800 }], 10_500)
+  const sampled = appendMetricHistory(rapid, [{ ...server, cpuPercent: 25, memoryMb: 820 }], 12_000)
+
+  assert.deepEqual(rapid.survival, [{ at: 10_000, cpuPercent: 20, memoryMb: 800 }])
+  assert.equal(sampled.survival?.length, 2)
+  assert.deepEqual(sampled.survival?.at(-1), { at: 12_000, cpuPercent: 25, memoryMb: 820 })
 })

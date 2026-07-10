@@ -33,6 +33,17 @@ export interface FileEntry {
   modifiedAt: string
 }
 
+export interface PlayerView {
+  uuid: string
+  username: string
+  isOnline: boolean
+  isOp: boolean
+  isWhitelisted: boolean
+  isBanned: boolean
+}
+
+export type PlayerAction = 'op' | 'deop' | 'remove-whitelist' | 'kick' | 'ban'
+
 export type SocketEvent =
   | { type: 'servers'; servers: ServerView[] }
   | { type: 'console'; serverId: string; line: string }

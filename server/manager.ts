@@ -5,6 +5,7 @@ import { realpath } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import type { ServerConfig, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
 import { InputError, resolveInside } from './core.ts'
+import { normaliseUuid, playerCommand, readPlayers } from './players.ts'
 
 const execFileAsync = promisify(execFile)
 const ANSI = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g
@@ -30,6 +31,7 @@ interface Runtime {
   cpuPercent: number
   memoryMb: number
   onlinePlayers: number
+  onlinePlayerNames: Set<string>
   console: string[]
   manualStop: boolean
   lastListAt: number
@@ -64,6 +66,25 @@ export class ServerManager {
   getConsole(id: string) {
     this.get(id)
     return this.state(id).console
+  }
+
+  listPlayers(id: string) {
+    const server = this.get(id)
+    return readPlayers(server.directory, this.state(id).onlinePlayerNames)
+  }
+
+  async playerAction(id: string, uuidValue: unknown, action: unknown) {
+    const uuid = normaliseUuid(uuidValue)
+    if (!uuid) throw new InputError('Invalid player UUID')
+    const player = (await this.listPlayers(id)).find((item) => item.uuid === uuid)
+    if (!player) throw new InputError('Player not found', 404)
+    if (action === 'op' && player.isOp) throw new InputError(`${player.username} is already an operator`, 409)
+    if (action === 'deop' && !player.isOp) throw new InputError(`${player.username} is not an operator`, 409)
+    if (action === 'remove-whitelist' && !player.isWhitelisted) throw new InputError(`${player.username} is not whitelisted`, 409)
+    if (action === 'kick' && !player.isOnline) throw new InputError(`${player.username} is not online`, 409)
+    if (action === 'ban' && player.isBanned) throw new InputError(`${player.username} is already banned`, 409)
+    this.command(id, playerCommand(action, player.username))
+    return { ok: true }
   }
 
   async add(config: ServerConfig) {
@@ -129,6 +150,7 @@ export class ServerManager {
     state.cpuPercent = 0
     state.memoryMb = 0
     state.onlinePlayers = 0
+    state.onlinePlayerNames.clear()
     state.manualStop = false
     this.log(id, `MineDeck: starting ${config.name} (PID ${child.pid ?? 'pending'})`)
     this.pipe(id, child.stdout)
@@ -202,7 +224,7 @@ export class ServerManager {
   private state(id: string) {
     let state = this.states.get(id)
     if (!state) {
-      state = { status: 'stopped', cpuPercent: 0, memoryMb: 0, onlinePlayers: 0, console: [], manualStop: false, lastListAt: 0 }
+      state = { status: 'stopped', cpuPercent: 0, memoryMb: 0, onlinePlayers: 0, onlinePlayerNames: new Set(), console: [], manualStop: false, lastListAt: 0 }
       this.states.set(id, state)
     }
     return state
@@ -252,8 +274,22 @@ export class ServerManager {
     const line = rawLine.replace(ANSI, '')
     state.console.push(line)
     if (state.console.length > MAX_CONSOLE_LINES) state.console.splice(0, state.console.length - MAX_CONSOLE_LINES)
-    const players = line.match(/There are (\d+) of a max/i)
-    if (players) state.onlinePlayers = Number(players[1])
+    const players = line.match(/There are (\d+) of a max(?: of)? \d+ players online:\s*(.*)$/i)
+    if (players) {
+      state.onlinePlayers = Number(players[1])
+      state.onlinePlayerNames = new Set((players[2] ?? '').split(',').map((name) => name.trim()).filter(Boolean))
+    }
+    const joined = line.match(/:\s*([A-Za-z0-9_]{1,16}) joined the game$/i)
+    const left = line.match(/:\s*([A-Za-z0-9_]{1,16}) left the game$/i)
+    if (joined) {
+      state.onlinePlayerNames.add(joined[1]!)
+      state.onlinePlayers = state.onlinePlayerNames.size
+      this.changed()
+    } else if (left) {
+      for (const name of state.onlinePlayerNames) if (name.toLowerCase() === left[1]!.toLowerCase()) state.onlinePlayerNames.delete(name)
+      state.onlinePlayers = state.onlinePlayerNames.size
+      this.changed()
+    }
     if (state.status === 'starting' && /Done \([\d.]+s\)!|For help, type/i.test(line)) {
       state.status = 'running'
       this.changed()
@@ -270,6 +306,7 @@ export class ServerManager {
     state.cpuPercent = 0
     state.memoryMb = 0
     state.onlinePlayers = 0
+    state.onlinePlayerNames.clear()
     const manual = state.manualStop
     state.status = manual ? 'stopped' : 'crashed'
     this.log(id, `MineDeck: process exited${code === null ? '' : ` with code ${code}`}${signal ? ` (${signal})` : ''}`)

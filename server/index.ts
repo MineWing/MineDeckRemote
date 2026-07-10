@@ -199,6 +199,13 @@ app.post('/api/servers/:id/command', async (request) => {
 
 app.get('/api/servers/:id/console', async (request) => ({ lines: manager.getConsole((request.params as { id: string }).id) }))
 
+app.get('/api/servers/:id/players', async (request) => manager.listPlayers((request.params as { id: string }).id))
+
+app.post('/api/servers/:id/players/:uuid/actions/:action', async (request) => {
+  const { id, uuid, action } = request.params as { id: string; uuid: string; action: string }
+  return manager.playerAction(id, uuid, action)
+})
+
 app.get('/api/servers/:id/files', async (request) => {
   const server = manager.get((request.params as { id: string }).id)
   const requested = (request.query as { path?: unknown }).path ?? ''
