@@ -1,5 +1,5 @@
-import { constants } from 'node:fs'
-import { access, readFile, realpath, stat } from 'node:fs/promises'
+import { constants, type Dirent } from 'node:fs'
+import { access, readFile, readdir, realpath, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import type { ServerConfig } from '../shared.ts'
@@ -11,6 +11,21 @@ export class InputError extends Error {
     super(message)
     this.statusCode = statusCode
   }
+}
+
+export function validateUploadName(value: unknown) {
+  if (
+    typeof value !== 'string'
+    || !value
+    || value === '.'
+    || value === '..'
+    || Buffer.byteLength(value) > 255
+    || value.includes('\0')
+    || /[\\/]/.test(value)
+  ) {
+    throw new InputError('Upload has an invalid file name')
+  }
+  return value
 }
 
 const text = (value: unknown, field: string, max: number) => {
@@ -81,45 +96,72 @@ export async function importServerConfig(value: unknown): Promise<ServerConfig> 
   const directory = expandHome(text(body.directory, 'Directory', 1000))
   if (!isAbsolute(directory)) throw new InputError('Directory must be an absolute path')
 
-  let contents: string
+  let entries: Dirent[]
   try {
-    contents = await readFile(await resolveInside(directory, 'start.bat'), 'utf8')
+    entries = await readdir(directory, { withFileTypes: true })
   } catch {
-    throw new InputError('No readable start.bat was found in the server directory')
+    throw new InputError('Server directory does not exist or is not readable')
   }
 
-  const lines = contents.replace(/\^\s*\r?\n/g, ' ').split(/\r?\n/)
-  let launch: { tokens: string[]; java: number; jar: number } | undefined
-  for (const line of lines) {
-    if (/^\s*(?:::|@?(?:echo|rem)(?:\s|$))/i.test(line)) continue
-    const tokens = [...line.matchAll(/(?:"[^"]*"|[^\s"]+)+/g)].map(([token]) => token.replace(/"([^"]*)"/g, '$1'))
-    const java = tokens.findIndex((token) => /(^|[\\/])java(?:\.exe)?$/i.test(token.replace(/^@/, '')))
-    const jar = tokens.findIndex((token, index) => index > java && token.toLowerCase() === '-jar')
-    if (java >= 0 && jar > java && tokens[jar + 1]) { launch = { tokens, java, jar }; break }
-  }
-  if (!launch) throw new InputError('start.bat must contain a Java command with -jar')
-
-  let minMemoryMb: number | undefined
-  let maxMemoryMb: number | undefined
+  let jar: string
+  let javaPath = 'java'
+  let minMemoryMb = 1024
+  let maxMemoryMb = 2048
   const javaArgs: string[] = []
-  const factors: Record<string, number> = { '': 1 / 1_048_576, K: 1 / 1024, M: 1, G: 1024, T: 1_048_576 }
-  for (const argument of launch.tokens.slice(launch.java + 1, launch.jar)) {
-    if (!/^-Xm[sx]/i.test(argument)) { javaArgs.push(argument); continue }
-    const match = argument.match(/^-Xm([sx])(\d+)([KMGT]?)$/i)
-    if (!match) throw new InputError(`Unsupported memory setting in start.bat: ${argument}`)
-    const memoryMb = Math.round(Number(match[2]) * factors[match[3]!.toUpperCase()]!)
-    if (match[1]!.toLowerCase() === 's') minMemoryMb = memoryMb
-    else maxMemoryMb = memoryMb
+  const startBatch = entries.find((entry) => entry.isFile() && entry.name.toLowerCase() === 'start.bat')
+
+  if (startBatch) {
+    let contents: string
+    try {
+      contents = await readFile(await resolveInside(directory, startBatch.name), 'utf8')
+    } catch {
+      throw new InputError('start.bat could not be read')
+    }
+
+    const lines = contents.replace(/\^\s*\r?\n/g, ' ').split(/\r?\n/)
+    let launch: { tokens: string[]; java: number; jar: number } | undefined
+    for (const line of lines) {
+      if (/^\s*(?:::|@?(?:echo|rem)(?:\s|$))/i.test(line)) continue
+      const tokens = [...line.matchAll(/(?:"[^"]*"|[^\s"]+)+/g)].map(([token]) => token.replace(/"([^"]*)"/g, '$1'))
+      const java = tokens.findIndex((token) => /(^|[\\/])java(?:\.exe)?$/i.test(token.replace(/^@/, '')))
+      const jarIndex = tokens.findIndex((token, index) => index > java && token.toLowerCase() === '-jar')
+      if (java >= 0 && jarIndex > java && tokens[jarIndex + 1]) { launch = { tokens, java, jar: jarIndex }; break }
+    }
+    if (!launch) throw new InputError('start.bat must contain a Java command with -jar')
+
+    let parsedMinMemoryMb: number | undefined
+    let parsedMaxMemoryMb: number | undefined
+    const factors: Record<string, number> = { '': 1 / 1_048_576, K: 1 / 1024, M: 1, G: 1024, T: 1_048_576 }
+    for (const argument of launch.tokens.slice(launch.java + 1, launch.jar)) {
+      if (!/^-Xm[sx]/i.test(argument)) { javaArgs.push(argument); continue }
+      const match = argument.match(/^-Xm([sx])(\d+)([KMGT]?)$/i)
+      if (!match) throw new InputError(`Unsupported memory setting in start.bat: ${argument}`)
+      const memoryMb = Math.round(Number(match[2]) * factors[match[3]!.toUpperCase()]!)
+      if (match[1]!.toLowerCase() === 's') parsedMinMemoryMb = memoryMb
+      else parsedMaxMemoryMb = memoryMb
+    }
+
+    jar = launch.tokens[launch.jar + 1]!
+    javaPath = launch.tokens[launch.java]!.replace(/^@/, '').replace(/%([^%]+)%/g, (token, name: string) => process.env[name] ?? token)
+    minMemoryMb = parsedMinMemoryMb ?? Math.min(parsedMaxMemoryMb ?? 1024, 1024)
+    maxMemoryMb = parsedMaxMemoryMb ?? Math.max(parsedMinMemoryMb ?? 2048, 2048)
+  } else {
+    const jars = entries.filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.jar'))
+    const conventional = jars.find((entry) => entry.name.toLowerCase() === 'server.jar')
+    if (!conventional && jars.length !== 1) {
+      const reason = jars.length ? 'Multiple server JARs were found' : 'No server JAR was found'
+      throw new InputError(`${reason}; use Manual setup to choose one`)
+    }
+    jar = (conventional ?? jars[0])!.name
   }
 
-  const javaPath = launch.tokens[launch.java]!.replace(/^@/, '').replace(/%([^%]+)%/g, (token, name: string) => process.env[name] ?? token)
   return validateServerConfig({
     name: text(body.name, 'Name', 50),
     directory,
-    jar: launch.tokens[launch.jar + 1],
+    jar,
     javaPath,
-    minMemoryMb: minMemoryMb ?? Math.min(maxMemoryMb ?? 1024, 1024),
-    maxMemoryMb: maxMemoryMb ?? Math.max(minMemoryMb ?? 2048, 2048),
+    minMemoryMb,
+    maxMemoryMb,
     javaArgs,
     autoRestart: true,
     stopTimeoutSeconds: 30,

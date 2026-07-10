@@ -9,7 +9,8 @@ MineDeck is a lightweight, self-hosted Minecraft server manager for macOS. It ru
 - Shows status, uptime, Java CPU/RAM, online players, and crash history
 - Optionally restarts a server five seconds after an unexpected exit
 - Edits server launch settings, memory limits, Java arguments, and stop timeout
-- Browses and edits text/config files inside each server folder
+- Browses files, uploads binary files, and syntax-highlights editable text/config files inside each server folder
+- Moves deleted files to the host machine's Trash or Recycle Bin so they remain recoverable
 - Protects the dashboard with scrypt-hashed passwords, rate-limited login, HttpOnly sessions, origin checks, and optional HTTPS
 
 No Docker, virtual machine, Redis, MariaDB, or external control panel is involved. Configuration is stored atomically in `data/minedeck.json`.
@@ -45,9 +46,11 @@ Prepare the server normally first: place its JAR in its own folder and accept Mo
 - a JAR path relative to that folder, usually `server.jar`;
 - the Java command (`java` uses the system installation) and memory limits.
 
+**Import existing** reads launch settings from `start.bat` when present. If there is no batch file, it selects `server.jar` (or the only top-level JAR) and uses `java`, 1 GB minimum RAM, and 2 GB maximum RAM as editable defaults. Use **Manual setup** when a folder contains multiple JARs and none is named `server.jar`.
+
 Java arguments are entered one per line. MineDeck always adds `-jar <jar> nogui`. A server configuration cannot be changed or removed while its process is running, and the same server cannot be started twice.
 
-The file browser is confined to that server folder, including through symbolic links. It edits text files up to 2 MB; binary files and destructive file deletion are intentionally excluded.
+The file browser is confined to that server folder, including through symbolic links. It syntax-highlights YAML, JSON, properties, TOML, XML, and shell files and edits text files up to 2 MB. Editor shortcuts follow the browser platform: Windows and Linux use `Ctrl` while macOS uses `⌘`. Uploads support up to 20 files at a time and 512 MB per file. Uploaded files never overwrite an existing name. Deleting a file sends it to the Trash or Recycle Bin of the machine running MineDeck; the API does not permanently unlink it.
 
 ## HTTPS and settings
 
