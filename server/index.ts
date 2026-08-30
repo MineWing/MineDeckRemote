@@ -1,6 +1,7 @@
 import Fastify from 'fastify'
 import fastifyStatic from '@fastify/static'
 import fastifyMultipart from '@fastify/multipart'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { constants, createWriteStream } from 'node:fs'
 import { link, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
@@ -11,13 +12,16 @@ import { promisify } from 'node:util'
 import trash from 'trash'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { FileEntry, SocketEvent } from '../shared.ts'
-import { importServerConfig, InputError, resolveInside, validateServerConfig, validateUploadName } from './core.ts'
+import { importServerConfig, InputError, resolveInside, resolveRecyclableEntry, validateServerConfig, validateUploadName } from './core.ts'
 import { ServerManager, type StoredData } from './manager.ts'
+import { downloadPaperJar, listPaperBuilds, listPaperVersions } from './paper.ts'
 
 const scryptAsync = promisify(scrypt)
 const DATA_PATH = resolve(process.env.MINEDECK_DATA ?? 'data/minedeck.json')
 const PORT = Number(process.env.MINEDECK_PORT ?? 8787)
 const HOST = process.env.MINEDECK_HOST ?? '0.0.0.0'
+const MDNS_HOST = process.env.MINEDECK_MDNS_HOST
+const localIp = Object.values(networkInterfaces()).flat().find((item) => item?.family === 'IPv4' && !item.internal)?.address
 const SESSION_HOURS = 12
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const MAX_UPLOAD_BYTES = 512 * 1024 * 1024
@@ -77,6 +81,8 @@ await app.register(fastifyMultipart, {
 const wss = new WebSocketServer({ noServer: true })
 const sessions = new Map<string, number>()
 const loginAttempts = new Map<string, { failures: number; blockedUntil: number }>()
+let closing = false
+let mdnsProcess: ChildProcess | undefined
 
 const cookies = (header = '') => Object.fromEntries(header.split(';').map((part) => {
   const [key, ...value] = part.trim().split('=')
@@ -168,7 +174,33 @@ app.post('/api/auth/password', async (request, reply) => {
 
 app.get('/api/servers', async () => manager.list())
 
-app.post('/api/servers', async (request) => manager.add(await validateServerConfig(request.body)))
+app.get('/api/paper/versions', async () => ({ versions: await listPaperVersions() }))
+
+app.get('/api/paper/versions/:version/builds', async (request) => ({
+  builds: await listPaperBuilds((request.params as { version: string }).version),
+}))
+
+app.get('/api/servers/:id/address', async (request) => {
+  const server = manager.get((request.params as { id: string }).id)
+  const properties = await readFile(join(server.directory, 'server.properties'), 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return ''
+    throw error
+  })
+  const configuredPort = properties.split(/\r?\n/).map((line) => line.match(/^\s*server-port\s*=\s*(\d+)\s*$/)?.[1]).find(Boolean)
+  const parsedPort = Number(configuredPort ?? 25565)
+  const port = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : 25565
+  return { address: localIp ? `${localIp}:${port}` : null }
+})
+
+app.post('/api/servers', async (request) => manager.add(await validateServerConfig(request.body, undefined, { createDirectory: true, requireJar: false })))
+
+app.post('/api/servers/paper', async (request) => {
+  const body = request.body as Record<string, unknown>
+  const config = await validateServerConfig(body, undefined, { createDirectory: true, requireJar: false })
+  await manager.checkAdd(config)
+  await downloadPaperJar(config.directory, config.jar, body.paperVersion, body.paperBuild)
+  return manager.add(config)
+})
 
 app.post('/api/servers/import', async (request) => manager.add(await importServerConfig(request.body)))
 
@@ -295,28 +327,28 @@ app.post('/api/servers/:id/files/upload', async (request) => {
 app.delete('/api/servers/:id/file', async (request) => {
   const server = manager.get((request.params as { id: string }).id)
   const requested = (request.body as { path?: unknown } | null)?.path
-  if (typeof requested !== 'string' || !requested) throw new InputError('File path is required')
-  const path = await resolveInside(server.directory, requested)
-  if (!(await lstat(path)).isFile()) throw new InputError('Only files can be moved to the recycle bin')
+  if (typeof requested !== 'string') throw new InputError('File or folder path is required')
+  const path = await resolveRecyclableEntry(server.directory, requested)
 
   await trash(path, { glob: false }).catch((error) => {
-    request.log.error(error, 'Could not move server file to the recycle bin')
-    throw new InputError('File could not be moved to the recycle bin', 500)
+    request.log.error(error, 'Could not move server file or folder to the recycle bin')
+    throw new InputError('File or folder could not be moved to the recycle bin', 500)
   })
   const stillExists = await lstat(path).then(() => true).catch((error: NodeJS.ErrnoException) => {
     if (error.code === 'ENOENT') return false
     throw error
   })
-  if (stillExists) throw new InputError('File could not be moved to the recycle bin', 500)
+  if (stillExists) throw new InputError('File or folder could not be moved to the recycle bin', 500)
   return { ok: true }
 })
 
 if (process.env.NODE_ENV === 'production') {
   await app.register(fastifyStatic, { root: resolve('dist') })
+  app.get('/servers/:id', (_request, reply) => reply.sendFile('index.html'))
 }
 
 app.server.on('upgrade', (request, socket, head) => {
-  if (request.url !== '/ws' || !validSession(request.headers.cookie)) {
+  if (closing || request.url !== '/ws' || !validSession(request.headers.cookie)) {
     socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
     socket.destroy()
     return
@@ -333,16 +365,53 @@ if (initialPassword) {
   app.log.warn('Sign in and change it from the dashboard. This password will not be shown again.')
 }
 const protocol = tls ? 'https' : 'http'
-const localIp = Object.values(networkInterfaces()).flat().find((item) => item?.family === 'IPv4' && !item.internal)?.address
 app.log.info(`MineDeck: ${address}`)
 if (localIp && HOST === '0.0.0.0') app.log.info(`Other devices: ${protocol}://${localIp}:${PORT}`)
 
-let closing = false
+if (MDNS_HOST) {
+  if (!/^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?\.local$/i.test(MDNS_HOST)) {
+    throw new Error('MINEDECK_MDNS_HOST must be a single hostname ending in .local')
+  }
+  if (process.platform !== 'darwin') {
+    app.log.warn('MINEDECK_MDNS_HOST currently requires macOS Bonjour')
+  } else if (!localIp) {
+    app.log.warn(`Could not advertise ${MDNS_HOST}: no local IPv4 address was found`)
+  } else {
+    mdnsProcess = spawn('/usr/bin/dns-sd', [
+      '-P',
+      'MineDeck',
+      tls ? '_https._tcp' : '_http._tcp',
+      'local',
+      String(PORT),
+      MDNS_HOST,
+      localIp,
+      'path=/',
+    ], { stdio: 'ignore' })
+    mdnsProcess.once('error', (error) => app.log.warn(error, `Could not advertise ${MDNS_HOST}`))
+    mdnsProcess.once('exit', (code, signal) => {
+      if (!closing) app.log.warn(`Bonjour advertisement stopped (${signal ?? `exit ${code ?? 'unknown'}`})`)
+    })
+    app.log.info(`Bonjour: ${protocol}://${MDNS_HOST}:${PORT}`)
+  }
+}
+
+if (process.platform === 'darwin' && process.env.MINEDECK_PREVENT_SLEEP === '1') {
+  const sleepAssertion = spawn('/usr/bin/caffeinate', ['-s', '-w', String(process.pid)], {
+    stdio: 'ignore',
+  })
+  sleepAssertion.once('error', (error) => app.log.warn(error, 'Could not prevent idle system sleep'))
+  sleepAssertion.unref()
+  app.log.info('Idle system sleep is disabled while this Mac is connected to power')
+}
+
 const shutdown = async () => {
   if (closing) return
   closing = true
+  mdnsProcess?.kill('SIGTERM')
   app.log.info('Stopping managed servers…')
   await manager.shutdown()
+  for (const client of wss.clients) client.terminate()
+  await new Promise<void>((done) => wss.close(() => done()))
   await app.close()
   process.exit(0)
 }

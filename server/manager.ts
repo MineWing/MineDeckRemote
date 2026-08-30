@@ -11,6 +11,27 @@ const execFileAsync = promisify(execFile)
 const ANSI = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g
 const MAX_CONSOLE_LINES = 800
 
+export const parsePlayerListLine = (line: string) => {
+  const match = line.match(/There are (\d+) of a max(?: of)? \d+ players online(?:[.:]\s*(.*))?$/i)
+  if (!match) return
+  return {
+    count: Number(match[1]),
+    names: (match[2] ?? '').split(',').map((name) => name.trim()).filter(Boolean),
+  }
+}
+
+export const serverLaunchArguments = (
+  config: Pick<ServerConfig, 'minMemoryMb' | 'maxMemoryMb' | 'javaArgs' | 'jar'>,
+) => [
+  `-Xms${config.minMemoryMb}M`,
+  `-Xmx${config.maxMemoryMb}M`,
+  ...config.javaArgs,
+  '-Djava.awt.headless=true',
+  '-jar',
+  config.jar,
+  'nogui',
+]
+
 interface CrashStats {
   crashCount: number
   lastCrashAt: string | null
@@ -34,7 +55,6 @@ interface Runtime {
   onlinePlayerNames: Set<string>
   console: string[]
   manualStop: boolean
-  lastListAt: number
   stopTimer?: NodeJS.Timeout
   restartTimer?: NodeJS.Timeout
 }
@@ -50,7 +70,7 @@ export class ServerManager {
     private publish: (event: SocketEvent) => void,
   ) {
     for (const server of data.servers) this.state(server.id)
-    this.metricsTimer = setInterval(() => void this.updateMetrics(), 2_000)
+    this.metricsTimer = setInterval(() => void this.updateMetrics(), 1_000)
   }
 
   list() {
@@ -88,16 +108,20 @@ export class ServerManager {
   }
 
   async add(config: ServerConfig) {
-    if (this.data.servers.some((server) => server.name.toLowerCase() === config.name.toLowerCase())) {
-      throw new InputError('A server with this name already exists', 409)
-    }
-    await this.ensureUniqueTarget(config)
+    await this.checkAdd(config)
     config.id = randomUUID()
     this.data.servers.push(config)
     this.state(config.id)
     await this.save()
     this.changed()
     return this.view(config)
+  }
+
+  async checkAdd(config: ServerConfig) {
+    if (this.data.servers.some((server) => server.name.toLowerCase() === config.name.toLowerCase())) {
+      throw new InputError('A server with this name already exists', 409)
+    }
+    await this.ensureUniqueTarget(config)
   }
 
   async update(id: string, config: ServerConfig) {
@@ -141,7 +165,7 @@ export class ServerManager {
 
     const child = spawn(
       config.javaPath,
-      [`-Xms${config.minMemoryMb}M`, `-Xmx${config.maxMemoryMb}M`, ...config.javaArgs, '-jar', config.jar, 'nogui'],
+      serverLaunchArguments(config),
       { cwd: config.directory, stdio: ['pipe', 'pipe', 'pipe'] },
     )
     state.process = child
@@ -204,8 +228,9 @@ export class ServerManager {
     if (!state.process || (state.status !== 'running' && state.status !== 'starting')) {
       throw new InputError('Server is not running', 409)
     }
-    state.process.stdin.write(`${command.trim()}\n`)
-    this.log(id, `> ${command.trim()}`)
+    const value = command.trim()
+    state.process.stdin.write(`${value}\n`)
+    this.log(id, `> ${value}`)
   }
 
   async shutdown() {
@@ -224,20 +249,24 @@ export class ServerManager {
   private state(id: string) {
     let state = this.states.get(id)
     if (!state) {
-      state = { status: 'stopped', cpuPercent: 0, memoryMb: 0, onlinePlayers: 0, onlinePlayerNames: new Set(), console: [], manualStop: false, lastListAt: 0 }
+      state = { status: 'stopped', cpuPercent: 0, memoryMb: 0, onlinePlayers: 0, onlinePlayerNames: new Set(), console: [], manualStop: false }
       this.states.set(id, state)
     }
     return state
   }
 
-  private async target(config: ServerConfig) {
-    return realpath(await resolveInside(config.directory, config.jar))
+  private async target(config: ServerConfig, allowMissing = false) {
+    const path = await resolveInside(config.directory, config.jar, allowMissing)
+    return realpath(path).catch((error: NodeJS.ErrnoException) => {
+      if (allowMissing && error.code === 'ENOENT') return path
+      throw error
+    })
   }
 
   private async ensureUniqueTarget(config: ServerConfig, exceptId?: string) {
-    const target = await this.target(config)
+    const target = await this.target(config, true)
     for (const other of this.data.servers) {
-      if (other.id !== exceptId && await this.target(other) === target) {
+      if (other.id !== exceptId && await this.target(other, true) === target) {
         throw new InputError('This server JAR is already managed by another configuration', 409)
       }
     }
@@ -272,13 +301,13 @@ export class ServerManager {
   private log(id: string, rawLine: string) {
     const state = this.state(id)
     const line = rawLine.replace(ANSI, '')
+    const players = parsePlayerListLine(line)
+    if (players) {
+      state.onlinePlayers = players.count
+      state.onlinePlayerNames = new Set(players.names)
+    }
     state.console.push(line)
     if (state.console.length > MAX_CONSOLE_LINES) state.console.splice(0, state.console.length - MAX_CONSOLE_LINES)
-    const players = line.match(/There are (\d+) of a max(?: of)? \d+ players online:\s*(.*)$/i)
-    if (players) {
-      state.onlinePlayers = Number(players[1])
-      state.onlinePlayerNames = new Set((players[2] ?? '').split(',').map((name) => name.trim()).filter(Boolean))
-    }
     const joined = line.match(/:\s*([A-Za-z0-9_]{1,16}) joined the game$/i)
     const left = line.match(/:\s*([A-Za-z0-9_]{1,16}) left the game$/i)
     if (joined) {
@@ -331,7 +360,7 @@ export class ServerManager {
     if (this.metricsBusy) return
     this.metricsBusy = true
     try {
-      await Promise.all([...this.states.entries()].map(async ([id, state]) => {
+      await Promise.all([...this.states.values()].map(async (state) => {
         const pid = state.process?.pid
         if (!pid) return
         if (process.platform !== 'win32') {
@@ -342,11 +371,6 @@ export class ServerManager {
             state.memoryMb = Math.round((Number(rss) || 0) / 1024)
           } catch { state.cpuPercent = state.memoryMb = 0 }
         }
-        if (state.status === 'running' && Date.now() - state.lastListAt > 15_000) {
-          state.process?.stdin.write('list\n')
-          state.lastListAt = Date.now()
-        }
-        void id
       }))
       this.changed()
     } finally {

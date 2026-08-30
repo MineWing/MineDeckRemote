@@ -10,7 +10,7 @@ import { toml } from '@codemirror/legacy-modes/mode/toml'
 import type { Extension } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
-import { Ban, Copy, KeyRound, LogOut, Play, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shield, ShieldOff, Square, Trash2, Upload, Users, UserX, X, Zap } from 'lucide-react'
+import { Ban, CheckCircle2, CircleX, Copy, Info, KeyRound, LogOut, Play, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shield, ShieldOff, Square, Trash2, TriangleAlert, Upload, Users, UserX, X, Zap } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -18,7 +18,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { consoleLineTokens } from '@/lib/console'
-import type { FileEntry, PlayerAction, PlayerView, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
+import type { FileEntry, PaperBuild, PlayerAction, PlayerView, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
@@ -35,6 +35,19 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
+const wait = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+
+async function waitUntilServerStops(id: string, timeoutMilliseconds: number) {
+  const deadline = Date.now() + timeoutMilliseconds
+  while (Date.now() < deadline) {
+    const servers = await api<ServerView[]>('/api/servers')
+    const server = servers.find((item) => item.id === id)
+    if (!server || server.status === 'stopped' || server.status === 'crashed') return
+    await wait(750)
+  }
+  throw new ApiError('The server did not stop in time. Try removing it again once it is stopped.', 409)
+}
+
 const statusStyle: Record<ServerStatus, string> = {
   running: 'bg-chart-2', starting: 'bg-chart-3', stopping: 'bg-chart-3', crashed: 'bg-destructive', stopped: 'bg-muted-foreground',
 }
@@ -45,13 +58,13 @@ type ToastContent = Omit<Toast, 'id' | 'group'>
 
 export function statusNotification(server: Pick<ServerView, 'name' | 'status' | 'autoRestart'>, previous: ServerStatus, restarting = false): ToastContent | undefined {
   if (server.status === previous) return
-  if (server.status === 'starting') return { tone: 'info', title: restarting || previous === 'crashed' ? 'Restarting server' : 'Starting server', message: `${server.name} is warming up…` }
+  if (server.status === 'starting') return { tone: 'info', title: restarting || previous === 'crashed' ? 'Restarting server' : 'Starting server', message: `${server.name} is starting up.` }
   if (server.status === 'running') return { tone: 'success', title: 'Server online', message: `${server.name} is ready for players.` }
-  if (server.status === 'stopping') return { tone: 'warning', title: restarting ? 'Restarting server' : 'Stopping server', message: `${server.name} is saving the world…` }
+  if (server.status === 'stopping') return { tone: 'warning', title: restarting ? 'Restarting server' : 'Stopping server', message: `${server.name} is saving before shutdown.` }
   if (server.status === 'stopped') return restarting
-    ? { tone: 'info', title: 'Restarting server', message: `${server.name} is starting again…` }
-    : { tone: 'success', title: 'Server stopped', message: `${server.name} is safely offline.` }
-  return { tone: 'error', title: 'Server crashed', message: `${server.name} exited unexpectedly.${server.autoRestart ? ' Restarting in 5 seconds…' : ''}` }
+    ? { tone: 'info', title: 'Restarting server', message: `${server.name} stopped and will start again.` }
+    : { tone: 'success', title: 'Server stopped', message: `${server.name} shut down safely.` }
+  return { tone: 'error', title: 'Server crashed', message: `${server.name} exited unexpectedly.${server.autoRestart ? ' Automatic restart scheduled.' : ''}` }
 }
 
 export const serverFormDisabled = (busy: boolean, status?: ServerStatus) =>
@@ -60,14 +73,59 @@ export const serverFormDisabled = (busy: boolean, status?: ServerStatus) =>
 export const usesAppleShortcutKeys = (platform: string) => /mac|iphone|ipad|ipod/i.test(platform)
 export const shortcutLabel = (key: string, platform: string) => `${usesAppleShortcutKeys(platform) ? '⌘' : 'Ctrl+'}${key.toUpperCase()}`
 
+interface ConsoleHistoryState {
+  command: string
+  index: number | null
+  draft: string
+}
+
+export function navigateConsoleHistory(
+  history: string[],
+  current: ConsoleHistoryState,
+  direction: 'up' | 'down',
+): ConsoleHistoryState {
+  if (!history.length || (direction === 'down' && current.index === null)) return current
+  if (direction === 'up') {
+    const index = current.index === null ? history.length - 1 : Math.max(0, current.index - 1)
+    return { command: history[index]!, index, draft: current.index === null ? current.command : current.draft }
+  }
+  const index = current.index! + 1
+  return index >= history.length
+    ? { command: current.draft, index: null, draft: '' }
+    : { command: history[index]!, index, draft: current.draft }
+}
+
 const browserPlatform = () => {
   if (typeof navigator === 'undefined') return ''
   const browser = navigator as Navigator & { userAgentData?: { platform?: string } }
   return browser.userAgentData?.platform || browser.platform || browser.userAgent
 }
 
+export const appThemes = [
+  { id: 'dracula', name: 'Dracula' },
+  { id: 'tiesen', name: 'Tiesen' },
+  { id: 'portfolio', name: 'Portfolio' },
+  { id: '2077', name: '2077' },
+  { id: 'nlan', name: 'NLAN' },
+  { id: 'discord', name: 'Discord' },
+  { id: 'terminal', name: 'Iconic Terminal' },
+] as const
+type AppTheme = (typeof appThemes)[number]['id']
+export const isAppTheme = (value: unknown): value is AppTheme => appThemes.some((theme) => theme.id === value)
+const storedTheme = (): AppTheme => {
+  try {
+    const value = localStorage.getItem('minedeck-theme')
+    return isAppTheme(value) ? value : 'dracula'
+  } catch { return 'dracula' }
+}
+
 const prettyStatus = (status: ServerStatus) => status.charAt(0).toUpperCase() + status.slice(1)
 const tabs = ['console', 'players', 'files', 'configuration'] as const
+const serverIdFromPath = () => {
+  const match = window.location.pathname.match(/^\/servers\/([^/]+)\/?$/)
+  if (!match) return ''
+  try { return decodeURIComponent(match[1]!) } catch { return '' }
+}
 const formatUptime = (seconds: number) => {
   if (!seconds) return '—'
   const days = Math.floor(seconds / 86400)
@@ -78,7 +136,7 @@ const formatUptime = (seconds: number) => {
 const formatSize = (bytes: number) => bytes < 1024 ? `${bytes} B` : bytes < 1048576 ? `${(bytes / 1024).toFixed(1)} KB` : `${(bytes / 1048576).toFixed(1)} MB`
 
 const METRIC_WINDOW_MS = 5 * 60_000
-const METRIC_SAMPLE_INTERVAL_MS = 1_500
+const METRIC_SAMPLE_INTERVAL_MS = 750
 interface MetricSample { at: number; cpuPercent: number; memoryMb: number }
 type MetricHistory = Record<string, MetricSample[]>
 
@@ -99,38 +157,38 @@ export function appendMetricHistory(current: MetricHistory, servers: ServerView[
 
 function Logo({ compact = false }: { compact?: boolean }) {
   return <div className="flex items-center gap-3">
-    <svg aria-hidden="true" viewBox="0 0 48 48" className={`${compact ? 'h-8 w-8' : 'h-10 w-10'} shrink-0 text-foreground drop-shadow-[0_0_12px_rgba(255,15,123,.35)]`}>
+    <svg aria-hidden="true" viewBox="0 0 48 48" className={`brand-mark ${compact ? 'h-8 w-8' : 'h-10 w-10'} shrink-0 text-foreground`}>
       <path d="m27.2 14.1 6.1 4.1-16.9 25.1-6.1-4.1 16.9-25.1Z" fill="currentColor" />
       <path d="M6.8 11.7C15.4 4.1 29.8 3.6 41.3 12l-3.5 5.1c-8.2-5.7-17.5-6-25.9-.2l-5.1-5.2Z" fill="currentColor" />
     </svg>
-    <div className="leading-none"><div className={`${compact ? 'text-lg' : 'text-xl'} font-black tracking-tight text-foreground`}>MINEDECK</div><div className={`${compact ? 'mt-0.5 text-[8px]' : 'mt-1 text-[10px]'} bg-gradient-to-r from-[#ff0f7b] to-[#f89b29] bg-clip-text font-black tracking-[.3em] text-transparent`}>REMOTE</div></div>
+    <div className="leading-none"><div className={`${compact ? 'text-lg' : 'text-xl'} font-black tracking-tight text-foreground`}>MINEDECK</div><div className={`${compact ? 'mt-0.5 text-[8px]' : 'mt-1 text-[10px]'} bg-gradient-to-r from-primary to-chart-4 bg-clip-text font-black tracking-[.3em] text-transparent`}>REMOTE</div></div>
   </div>
 }
 
-const toastStyle: Record<ToastTone, { icon: string; border: string; glow: string; bar: string }> = {
-  success: { icon: '✓', border: 'border-chart-2/40', glow: 'bg-chart-2/15 text-chart-2', bar: 'bg-chart-2' },
-  info: { icon: '↻', border: 'border-chart-5/40', glow: 'bg-chart-5/15 text-chart-5', bar: 'bg-chart-5' },
-  warning: { icon: '!', border: 'border-chart-3/40', glow: 'bg-chart-3/15 text-chart-3', bar: 'bg-chart-3' },
-  error: { icon: '×', border: 'border-destructive/40', glow: 'bg-destructive/15 text-destructive', bar: 'bg-destructive' },
+const toastStyle: Record<ToastTone, { icon: ReactNode; accent: string; iconStyle: string }> = {
+  success: { icon: <CheckCircle2 />, accent: 'bg-chart-2', iconStyle: 'bg-chart-2/10 text-chart-2' },
+  info: { icon: <Info />, accent: 'bg-chart-5', iconStyle: 'bg-chart-5/10 text-chart-5' },
+  warning: { icon: <TriangleAlert />, accent: 'bg-chart-3', iconStyle: 'bg-chart-3/10 text-chart-3' },
+  error: { icon: <CircleX />, accent: 'bg-destructive', iconStyle: 'bg-destructive/10 text-destructive' },
 }
 
 function Toasts({ items, onDismiss }: { items: Toast[]; onDismiss: (id: number) => void }) {
-  return <div className="pointer-events-none fixed inset-x-3 top-3 z-[60] flex flex-col items-end gap-3 sm:left-auto sm:right-5 sm:top-5 sm:w-96" aria-live="polite" aria-atomic="true">
+  return <div className="pointer-events-none fixed inset-x-3 top-3 z-[60] flex flex-col items-end gap-2 sm:left-auto sm:right-4 sm:top-4 sm:w-[22rem]">
     {items.map((toast) => {
       const style = toastStyle[toast.tone]
-      return <div key={toast.id} role={toast.tone === 'error' ? 'alert' : 'status'} className={`toast pointer-events-auto relative w-full overflow-hidden rounded-xl border ${style.border} bg-popover/95 p-4 pr-12 text-popover-foreground shadow-md backdrop-blur-xl`}>
-        <div className="flex gap-3">
-          <span aria-hidden="true" className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl text-lg font-black shadow-[0_0_24px_currentColor] ${style.glow}`}>{style.icon}</span>
-          <div className="min-w-0 pt-0.5"><div className="font-bold text-popover-foreground">{toast.title}</div><div className="mt-1 text-sm leading-5 text-muted-foreground">{toast.message}</div></div>
+      return <div key={toast.id} role={toast.tone === 'error' ? 'alert' : 'status'} aria-atomic="true" className="toast pointer-events-auto relative w-full overflow-hidden rounded-lg border border-border/80 bg-popover/95 p-3 pr-10 text-popover-foreground shadow-lg backdrop-blur-xl">
+        <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-1 ${style.accent}`} />
+        <div className="flex items-start gap-2.5 pl-1">
+          <span aria-hidden="true" className={`grid size-8 shrink-0 place-items-center rounded-lg [&_svg]:size-4 ${style.iconStyle}`}>{style.icon}</span>
+          <div className="min-w-0 pt-px"><div className="text-sm font-semibold leading-5 text-popover-foreground">{toast.title}</div><div className="mt-0.5 text-xs leading-[1.125rem] text-muted-foreground">{toast.message}</div></div>
         </div>
-        <Button variant="ghost" size="icon-sm" className="absolute right-2 top-2 text-muted-foreground" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification"><X /></Button>
-        <span className={`toast-timer absolute inset-x-0 bottom-0 h-0.5 ${style.bar}`} />
+        <Button variant="ghost" size="icon-xs" className="absolute right-2 top-2 text-muted-foreground/70 hover:text-foreground" onClick={() => onDismiss(toast.id)} aria-label="Dismiss notification"><X /></Button>
       </div>
     })}
   </div>
 }
 
-function Login({ onLogin }: { onLogin: () => void }) {
+function Login({ onLogin, theme, onThemeChange }: { onLogin: () => void; theme: AppTheme; onThemeChange: (theme: AppTheme) => void }) {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -141,21 +199,24 @@ function Login({ onLogin }: { onLogin: () => void }) {
       onLogin()
     } catch (reason) { setError((reason as Error).message) } finally { setBusy(false) }
   }
-  return <main className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background p-5">
-    <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_15%,rgba(189,147,249,.18),transparent_38%)]" />
-    <Card className="relative w-full max-w-sm gap-0 overflow-hidden py-0 shadow-md">
-      <CardContent className="p-7 sm:p-9">
-        <div className="mb-9"><Logo /><h1 className="mt-8 text-2xl font-bold text-foreground">Welcome back</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">Sign in to manage your Minecraft servers.</p></div>
-        <form onSubmit={submit}>
-          <Label className="mb-2" htmlFor="password">Admin password</Label>
-          <Input id="password" className="h-10" type="password" autoComplete="current-password" autoFocus required value={password} onChange={(event) => setPassword(event.target.value)} />
-          {error && <Alert variant="destructive" className="mt-3"><AlertDescription>{error}</AlertDescription></Alert>}
-          <Button className="mt-5 w-full" size="lg" disabled={busy}><KeyRound />{busy ? 'Signing in…' : 'Sign in'}</Button>
-        </form>
-        <p className="mt-6 text-center text-xs text-muted-foreground">Private by default · Session protected</p>
-      </CardContent>
-    </Card>
-  </main>
+  return <div className="flex min-h-screen flex-col bg-background text-foreground">
+    <main className="relative flex flex-1 items-center justify-center overflow-hidden p-5">
+      <div className="login-glow pointer-events-none absolute inset-0" />
+      <Card className="relative w-full max-w-sm gap-0 overflow-hidden py-0 shadow-md">
+        <CardContent className="p-7 sm:p-9">
+          <div className="mb-9"><Logo /><h1 className="mt-8 text-2xl font-bold text-foreground">Welcome back</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">Sign in to manage your Minecraft servers.</p></div>
+          <form onSubmit={submit}>
+            <Label className="mb-2" htmlFor="password">Admin password</Label>
+            <Input id="password" className="h-10" type="password" autoComplete="current-password" autoFocus required value={password} onChange={(event) => setPassword(event.target.value)} />
+            {error && <Alert variant="destructive" className="mt-3"><AlertDescription>{error}</AlertDescription></Alert>}
+            <Button className="mt-5 w-full" size="lg" disabled={busy}><KeyRound />{busy ? 'Signing in…' : 'Sign in'}</Button>
+          </form>
+          <p className="mt-6 text-center text-xs text-muted-foreground">Private by default · Session protected</p>
+        </CardContent>
+      </Card>
+    </main>
+    <ThemeFooter selected={theme} onChange={onThemeChange} />
+  </div>
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
@@ -169,9 +230,41 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
   </div>
 }
 
+function ConfirmationModal({ title, message, confirmLabel, busyLabel, busy, onConfirm, onClose }: {
+  title: string
+  message: ReactNode
+  confirmLabel: string
+  busyLabel: string
+  busy: boolean
+  onConfirm: () => void
+  onClose: () => void
+}) {
+  return <Modal title={title} onClose={() => { if (!busy) onClose() }}>
+    <div className="space-y-5 p-5 sm:p-6">
+      <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 p-4">
+        <TriangleAlert className="mt-0.5 size-5 shrink-0 text-destructive" />
+        <p className="text-sm leading-6 text-foreground/90">{message}</p>
+      </div>
+      <div className="flex justify-end gap-2">
+        <Button variant="outline" disabled={busy} onClick={onClose}>Cancel</Button>
+        <Button variant="destructive" disabled={busy} onClick={onConfirm}><Trash2 />{busy ? busyLabel : confirmLabel}</Button>
+      </div>
+    </div>
+  </Modal>
+}
+
 interface ServerFormValue {
   name: string; directory: string; jar: string; javaPath: string; minMemoryMb: number; maxMemoryMb: number; javaArgs: string; autoRestart: boolean; stopTimeoutSeconds: number
 }
+
+const RAM_SLIDER_DEFAULT_MAX_MB = 24 * 1024
+export const memoryForMaximum = (minMemoryMb: number, maxMemoryMb: number) => ({
+  minMemoryMb: Math.min(minMemoryMb, maxMemoryMb),
+  maxMemoryMb,
+})
+const formatMemoryMb = (memoryMb: number) => memoryMb < 1024
+  ? `${memoryMb} MB`
+  : `${Number((memoryMb / 1024).toFixed(2))} GB`
 
 const formValue = (server?: ServerView): ServerFormValue => ({
   name: server?.name ?? '', directory: server?.directory ?? '', jar: server?.jar ?? 'server.jar', javaPath: server?.javaPath ?? 'java',
@@ -181,33 +274,82 @@ const formValue = (server?: ServerView): ServerFormValue => ({
 
 function ServerForm({ server, onSaved, onCancel, onDelete }: { server?: ServerView; onSaved: (server: ServerView) => void; onCancel?: () => void; onDelete?: () => void }) {
   const [value, setValue] = useState(() => formValue(server))
-  const [mode, setMode] = useState<'import' | 'manual'>(server ? 'manual' : 'import')
+  const [mode, setMode] = useState<'import' | 'paper' | 'manual'>(server ? 'manual' : 'import')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [paperError, setPaperError] = useState('')
+  const [paperLoading, setPaperLoading] = useState(false)
+  const [paperVersions, setPaperVersions] = useState<string[]>([])
+  const [paperVersion, setPaperVersion] = useState('')
+  const [paperBuilds, setPaperBuilds] = useState<PaperBuild[]>([])
+  const [paperBuild, setPaperBuild] = useState<number | ''>('')
   useEffect(() => {
     setValue(formValue(server))
   }, [server?.id])
+  useEffect(() => {
+    if (server || mode !== 'paper' || paperVersions.length) return
+    let active = true
+    setPaperLoading(true); setPaperError('')
+    void api<{ versions: string[] }>('/api/paper/versions').then(({ versions }) => {
+      if (!active) return
+      setPaperVersions(versions)
+      setPaperVersion(versions[0] ?? '')
+      if (!versions.length) setPaperError('No Paper release versions are currently available.')
+    }).catch((reason) => active && setPaperError((reason as Error).message)).finally(() => active && setPaperLoading(false))
+    return () => { active = false }
+  }, [mode, paperVersions.length, server])
+  useEffect(() => {
+    if (server || mode !== 'paper' || !paperVersion) return
+    let active = true
+    setPaperLoading(true); setPaperError(''); setPaperBuilds([]); setPaperBuild('')
+    void api<{ builds: PaperBuild[] }>(`/api/paper/versions/${encodeURIComponent(paperVersion)}/builds`).then(({ builds }) => {
+      if (!active) return
+      setPaperBuilds(builds)
+      setPaperBuild(builds[0]?.id ?? '')
+      if (!builds.length) setPaperError(`Paper has no stable builds for Minecraft ${paperVersion}.`)
+    }).catch((reason) => active && setPaperError((reason as Error).message)).finally(() => active && setPaperLoading(false))
+    return () => { active = false }
+  }, [mode, paperVersion, server])
   const set = <K extends keyof ServerFormValue>(key: K, next: ServerFormValue[K]) => setValue((current) => ({ ...current, [key]: next }))
+  const setMaximumMemory = (maxMemoryMb: number) => setValue((current) => ({ ...current, ...memoryForMaximum(current.minMemoryMb, maxMemoryMb) }))
+  const ramSliderMax = Math.max(RAM_SLIDER_DEFAULT_MAX_MB, Math.ceil(value.maxMemoryMb / 512) * 512)
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError('')
     const importing = !server && mode === 'import'
-    const payload = importing ? { name: value.name, directory: value.directory } : { ...value, javaArgs: value.javaArgs.split('\n').map((arg) => arg.trim()).filter(Boolean) }
+    const downloadingPaper = !server && mode === 'paper'
+    const settings = { ...value, javaArgs: value.javaArgs.split('\n').map((arg) => arg.trim()).filter(Boolean) }
+    const payload = importing ? { name: value.name, directory: value.directory } : downloadingPaper ? { ...settings, paperVersion, paperBuild } : settings
     try {
-      const saved = await api<ServerView>(server ? `/api/servers/${server.id}` : importing ? '/api/servers/import' : '/api/servers', { method: server ? 'PUT' : 'POST', body: JSON.stringify(payload) })
+      const saved = await api<ServerView>(server ? `/api/servers/${server.id}` : importing ? '/api/servers/import' : downloadingPaper ? '/api/servers/paper' : '/api/servers', { method: server ? 'PUT' : 'POST', body: JSON.stringify(payload) })
       onSaved(saved)
     } catch (reason) { setError((reason as Error).message) } finally { setBusy(false) }
   }
   return <form onSubmit={submit} className="space-y-5 p-5 sm:p-6">
-    {!server && <div className="grid grid-cols-2 gap-2 rounded-lg bg-muted p-1">
+    {!server && <div className="grid grid-cols-3 gap-2 rounded-lg bg-muted p-1">
       <Button type="button" aria-pressed={mode === 'import'} variant={mode === 'import' ? 'default' : 'ghost'} onClick={() => { setMode('import'); setError('') }}>Import existing</Button>
+      <Button type="button" aria-pressed={mode === 'paper'} variant={mode === 'paper' ? 'default' : 'ghost'} onClick={() => { setMode('paper'); set('jar', 'paper.jar'); setError('') }}>Download Paper</Button>
       <Button type="button" aria-pressed={mode === 'manual'} variant={mode === 'manual' ? 'default' : 'ghost'} onClick={() => { setMode('manual'); setError('') }}>Manual setup</Button>
     </div>}
     <label><span className="label">Server name</span><Input required maxLength={50} value={value.name} onChange={(event) => set('name', event.target.value)} placeholder="Survival" /></label>
-    <label><span className="label">Server directory</span><Input className="font-mono" required value={value.directory} onChange={(event) => set('directory', event.target.value)} placeholder="/Users/alex/minecraft/survival" /><span className="mt-1.5 block text-xs text-muted-foreground">{!server && mode === 'import' ? <>The existing folder containing <code>start.bat</code> or a server JAR.</> : <>An existing folder containing the JAR file. <code>~/…</code> is supported.</>}</span></label>
-    {(!server && mode === 'manual' || server) && <>
-      <div className="grid gap-4 sm:grid-cols-2">
-      <label><span className="label">Server JAR</span><Input className="font-mono" required value={value.jar} onChange={(event) => set('jar', event.target.value)} placeholder="server.jar" /></label>
+    <label><span className="label">Server directory</span><Input className="font-mono" required value={value.directory} onChange={(event) => set('directory', event.target.value)} placeholder="/Users/alex/minecraft/survival" /><span className="mt-1.5 block text-xs text-muted-foreground">{!server && mode === 'import' ? <>The existing folder containing <code>start.sh</code>, <code>start.bat</code>, or a server JAR. Memory, JAR, and JVM flags are imported when available.</> : server ? <>An existing folder containing the JAR file. <code>~/…</code> is supported.</> : mode === 'paper' ? <>The folder will be created and the selected stable Paper JAR will be downloaded into it.</> : <>The folder will be created if it does not exist. You can upload the server JAR afterward.</>}</span></label>
+    {!server && mode === 'paper' && <div className="rounded-lg border border-border bg-muted/30 p-4">
+      <div className="flex items-start justify-between gap-4"><div><div className="text-sm font-semibold text-foreground">Paper server</div><p className="mt-1 text-xs leading-5 text-muted-foreground">MineDeck downloads stable builds from PaperMC and verifies the SHA-256 checksum. You will still need to accept Mojang's EULA before the server can run.</p></div><Badge variant="outline">Paper only</Badge></div>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <label><span className="label">Minecraft version</span><select className="field" required disabled={paperLoading && !paperVersions.length} value={paperVersion} onChange={(event) => setPaperVersion(event.target.value)}><option value="">{paperLoading ? 'Loading versions…' : 'Choose a version'}</option>{paperVersions.map((version) => <option key={version} value={version}>{version}</option>)}</select></label>
+        <label><span className="label">Paper build</span><select className="field" required disabled={paperLoading || !paperBuilds.length} value={paperBuild} onChange={(event) => setPaperBuild(Number(event.target.value))}><option value="">{paperLoading && paperVersion ? 'Loading builds…' : 'Choose a stable build'}</option>{paperBuilds.map((build, index) => <option key={build.id} value={build.id}>#{build.id}{index === 0 ? ' · latest stable' : ''} · {formatSize(build.size)}</option>)}</select></label>
       </div>
+      {paperError && <p role="alert" className="mt-3 text-xs text-destructive">{paperError}</p>}
+    </div>}
+    {(server || mode !== 'import') && <>
+      <div className="grid gap-4 sm:grid-cols-2">
+      <label><span className="label">Server JAR{mode === 'paper' && !server ? ' filename' : ''}</span><Input className="font-mono" required value={value.jar} onChange={(event) => set('jar', event.target.value)} placeholder="server.jar" /></label>
+      </div>
+    <label className="block rounded-lg border border-border bg-muted/30 px-4 py-4">
+      <span className="flex items-center justify-between gap-4"><span className="text-sm font-semibold text-foreground">RAM allocation</span><output className="rounded-md bg-primary/10 px-2.5 py-1 text-sm font-bold tabular-nums text-primary">{formatMemoryMb(value.maxMemoryMb)} max</output></span>
+      <input className="mt-4 h-2 w-full cursor-pointer accent-primary" type="range" min={256} max={ramSliderMax} step={256} value={value.maxMemoryMb} onChange={(event) => setMaximumMemory(event.target.valueAsNumber)} />
+      <span className="mt-2 flex justify-between text-[11px] tabular-nums text-muted-foreground"><span>256 MB</span><span>{formatMemoryMb(ramSliderMax / 2)}</span><span>{formatMemoryMb(ramSliderMax)}</span></span>
+      <span className="mt-2 block text-xs text-muted-foreground">Drag to set the maximum heap. Minimum RAM is lowered automatically if necessary.</span>
+    </label>
     <div className="grid gap-4 sm:grid-cols-3">
       <label><span className="label">Java command</span><Input className="font-mono" required value={value.javaPath} onChange={(event) => set('javaPath', event.target.value)} /></label>
       <label><span className="label">Minimum RAM (MB)</span><Input type="number" min={256} max={65536} required value={value.minMemoryMb} onChange={(event) => set('minMemoryMb', event.target.valueAsNumber)} /></label>
@@ -225,34 +367,45 @@ function ServerForm({ server, onSaved, onCancel, onDelete }: { server?: ServerVi
     {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     <div className="flex flex-wrap justify-between gap-3 border-t border-border pt-5">
       <div>{server && onDelete && <Button type="button" variant="destructive" onClick={onDelete}><Trash2 />Remove server</Button>}</div>
-      <div className="flex gap-2">{onCancel && <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>}<Button disabled={serverFormDisabled(busy, server?.status)}><Save />{busy ? 'Saving…' : server ? 'Save changes' : mode === 'import' ? 'Import server' : 'Add server'}</Button></div>
+      <div className="flex gap-2">{onCancel && <Button type="button" variant="outline" onClick={onCancel}>Cancel</Button>}<Button disabled={serverFormDisabled(busy, server?.status) || (!server && mode === 'paper' && (paperLoading || !paperVersion || paperBuild === ''))}><Save />{busy ? mode === 'paper' ? 'Downloading Paper…' : 'Saving…' : server ? 'Save changes' : mode === 'import' ? 'Import server' : mode === 'paper' ? 'Download and add' : 'Add server'}</Button></div>
     </div>
   </form>
 }
 
-function Console({ server, lines, samples, onCommand }: { server: ServerView; lines: string[]; samples: MetricSample[]; onCommand: (command: string) => Promise<void> }) {
+function Console({ server, address, lines, samples, onCommand }: { server: ServerView; address: string | null | undefined; lines: string[]; samples: MetricSample[]; onCommand: (command: string) => Promise<void> }) {
   const [command, setCommand] = useState('')
   const [error, setError] = useState('')
+  const [history, setHistory] = useState<string[]>([])
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null)
+  const [historyDraft, setHistoryDraft] = useState('')
   const end = useRef<HTMLDivElement>(null)
   useEffect(() => {
     end.current?.scrollIntoView({ block: 'end' })
   }, [lines.length])
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!command.trim()) return
-    const value = command; setCommand(''); setError('')
+    const value = command; setCommand(''); setError(''); setHistory((items) => [...items, value].slice(-100)); setHistoryIndex(null); setHistoryDraft('')
     try { await onCommand(value) } catch (reason) { setError((reason as Error).message); setCommand(value) }
+  }
+  const navigateHistory = (direction: 'up' | 'down') => {
+    const next = navigateConsoleHistory(history, { command, index: historyIndex, draft: historyDraft }, direction)
+    setCommand(next.command); setHistoryIndex(next.index); setHistoryDraft(next.draft)
   }
   const running = server.status === 'running' || server.status === 'starting'
   return <div className="space-y-4">
+    <div className="panel flex items-center justify-between gap-4 px-4 py-3">
+      <div className="min-w-0"><div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Server address</div><code className="mt-1 block truncate text-sm font-semibold text-foreground">{address === undefined ? 'Loading…' : address ?? 'Unavailable'}</code></div>
+      <Button variant="outline" size="sm" disabled={!address} onClick={() => address && void navigator.clipboard.writeText(address)}><Copy />Copy address</Button>
+    </div>
     <section className="panel overflow-hidden">
       <div className="flex items-center justify-between border-b border-border px-4 py-3"><span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><span className={`h-2 w-2 rounded-full ${running ? 'bg-chart-2 shadow-[0_0_8px_#50fa7b]' : 'bg-muted-foreground'}`} />Live console</span><Button variant="ghost" size="xs" onClick={() => navigator.clipboard.writeText(lines.join('\n'))}>Copy output</Button></div>
       <div className="console-lines h-[48vh] min-h-80 overflow-auto bg-sidebar py-3 font-mono text-[12px] leading-5 text-foreground sm:text-[13px]">
-        {!lines.length && <div data-line="" className="px-3 text-muted-foreground">Console output will appear here.</div>}
-        {lines.map((line, index) => <div key={`${index}-${line}`} data-line={index + 1} className="whitespace-pre-wrap break-all px-3 hover:bg-white/[.025]">{consoleLineTokens(line).map((token, tokenIndex) => <span key={tokenIndex} className={token.className}>{token.text}</span>)}</div>)}
+        {!lines.length && <div className="px-3 text-muted-foreground">Console output will appear here.</div>}
+        {lines.map((line, index) => <div key={`${index}-${line}`} className="whitespace-pre-wrap break-all px-3 hover:bg-white/[.025]">{consoleLineTokens(line).map((token, tokenIndex) => <span key={tokenIndex} className={token.className}>{token.text}</span>)}</div>)}
         <div ref={end} />
       </div>
       <form onSubmit={submit} className="border-t border-border bg-card p-3">
-        <div className="flex gap-2"><span className="flex items-center font-mono font-bold text-primary">›</span><Input className="h-10 flex-1 font-mono" aria-label="Console command" placeholder={running ? 'Enter a Minecraft command…' : 'Start the server to send commands'} disabled={!running} value={command} onChange={(event) => setCommand(event.target.value)} /><Button size="lg" disabled={!running}><Send />Send</Button></div>
+        <div className="flex gap-2"><span className="flex items-center font-mono font-bold text-primary">›</span><Input className="h-10 flex-1 font-mono" aria-label="Console command" placeholder={running ? 'Enter a Minecraft command…' : 'Start the server to send commands'} disabled={!running} value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); navigateHistory(event.key === 'ArrowUp' ? 'up' : 'down') } }} /><Button size="lg" disabled={!running}><Send />Send</Button></div>
         {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
       </form>
     </section>
@@ -312,31 +465,31 @@ function ResourceChart({ title, value, detail = 'Java process', samples, getValu
 }
 
 const editorTheme = EditorView.theme({
-  '&': { height: '100%', backgroundColor: '#21222c', color: '#f8f8f2', fontSize: '13px' },
+  '&': { height: '100%', backgroundColor: 'var(--sidebar)', color: 'var(--foreground)', fontSize: '13px' },
   '&.cm-focused': { outline: 'none' },
   '.cm-scroller': { fontFamily: '"Fira Code Variable", "Fira Code", monospace', lineHeight: '1.65', overflow: 'auto' },
-  '.cm-content': { padding: '14px 0', caretColor: '#bd93f9' },
+  '.cm-content': { padding: '14px 0', caretColor: 'var(--primary)' },
   '.cm-line': { padding: '0 18px' },
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: '#bd93f9' },
-  '.cm-gutters': { backgroundColor: '#282a36', color: '#73778e', border: 'none', borderRight: '1px solid #44475a' },
+  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--primary)' },
+  '.cm-gutters': { backgroundColor: 'var(--background)', color: 'var(--muted-foreground)', border: 'none', borderRight: '1px solid var(--border)' },
   '.cm-lineNumbers .cm-gutterElement': { padding: '0 12px 0 10px', minWidth: '44px' },
-  '.cm-activeLine': { backgroundColor: '#ffffff08' },
-  '.cm-activeLineGutter': { backgroundColor: '#bd93f91a', color: '#bd93f9' },
-  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': { backgroundColor: '#bd93f940' },
-  '.cm-foldGutter .cm-gutterElement': { color: '#9ca3af' },
-  '.cm-searchMatch': { backgroundColor: '#ffb86c40', outline: '1px solid #ffb86c80' },
-  '.cm-panels': { backgroundColor: '#2d2f3b', color: '#f8f8f2' },
+  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--foreground), transparent 96%)' },
+  '.cm-activeLineGutter': { backgroundColor: 'color-mix(in srgb, var(--primary), transparent 88%)', color: 'var(--primary)' },
+  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': { backgroundColor: 'color-mix(in srgb, var(--primary), transparent 75%)' },
+  '.cm-foldGutter .cm-gutterElement': { color: 'var(--muted-foreground)' },
+  '.cm-searchMatch': { backgroundColor: 'color-mix(in srgb, var(--chart-3), transparent 70%)', outline: '1px solid var(--chart-3)' },
+  '.cm-panels': { backgroundColor: 'var(--card)', color: 'var(--card-foreground)' },
 }, { dark: true })
 
 const editorHighlighting = syntaxHighlighting(HighlightStyle.define([
-  { tag: tags.comment, color: '#6272a4', fontStyle: 'italic' },
-  { tag: [tags.propertyName, tags.attributeName, tags.tagName], color: '#8be9fd' },
-  { tag: [tags.string, tags.attributeValue], color: '#50fa7b' },
-  { tag: [tags.number, tags.bool, tags.null, tags.atom], color: '#ffb86c' },
-  { tag: [tags.keyword, tags.modifier, tags.typeName], color: '#ff79c6' },
-  { tag: [tags.operator, tags.punctuation, tags.bracket], color: '#bd93f9' },
-  { tag: [tags.variableName, tags.name], color: '#f8f8f2' },
-  { tag: tags.invalid, color: '#ff5555', textDecoration: 'underline' },
+  { tag: tags.comment, color: 'var(--muted-foreground)', fontStyle: 'italic' },
+  { tag: [tags.propertyName, tags.attributeName, tags.tagName], color: 'var(--chart-5)' },
+  { tag: [tags.string, tags.attributeValue], color: 'var(--chart-2)' },
+  { tag: [tags.number, tags.bool, tags.null, tags.atom], color: 'var(--chart-3)' },
+  { tag: [tags.keyword, tags.modifier, tags.typeName], color: 'var(--chart-4)' },
+  { tag: [tags.operator, tags.punctuation, tags.bracket], color: 'var(--chart-1)' },
+  { tag: [tags.variableName, tags.name], color: 'var(--foreground)' },
+  { tag: tags.invalid, color: 'var(--destructive)', textDecoration: 'underline' },
 ]))
 
 interface EditorLanguage { label: string; extension?: Extension }
@@ -381,6 +534,7 @@ function Files({ server }: { server: ServerView }) {
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<{ name: string; target: string; type: 'file' | 'directory' }>()
   const [dragging, setDragging] = useState(false)
   const [cursor, setCursor] = useState({ line: 1, column: 1 })
   const uploadInput = useRef<HTMLInputElement>(null)
@@ -439,16 +593,14 @@ function Files({ server }: { server: ServerView }) {
       if (refreshed) setEntries(refreshed.entries)
     } finally { setBusy('') }
   }
-  const deleteFile = async (name: string, target: string) => {
-    const warning = target === file && dirty ? ' Unsaved editor changes will also be lost.' : ''
-    if (!confirm(`Move “${name}” to the hosted machine’s recycle bin?${warning}`)) return
+  const deleteEntry = async (name: string, target: string, type: 'file' | 'directory' = 'file') => {
     setBusy('Moving to recycle bin…'); setError(''); setNotice('')
     try {
       await api(`/api/servers/${server.id}/file`, { method: 'DELETE', body: JSON.stringify({ path: target }) })
       setEntries((await getDirectory(path)).entries)
       if (target === file) { setFile(''); setContent(''); setSavedContent(''); setCursor({ line: 1, column: 1 }) }
       setNotice(`${name} was moved to the hosted machine’s recycle bin.`)
-    } catch (reason) { setError((reason as Error).message) } finally { setBusy('') }
+    } catch (reason) { setError((reason as Error).message) } finally { setBusy(''); setPendingDelete(undefined) }
   }
 
   useEffect(() => {
@@ -490,7 +642,7 @@ function Files({ server }: { server: ServerView }) {
             <button disabled={entry.type === 'link' || Boolean(busy)} className="flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5 text-left disabled:opacity-50" onClick={() => entry.type === 'directory' ? void loadDirectory(target) : void loadFile(entry.name)}>
               <FileGlyph entry={entry} /><span className="min-w-0 flex-1"><span className={`block truncate text-sm font-medium ${selected ? 'text-primary' : 'text-foreground/80 group-hover:text-foreground'}`}>{entry.name}</span><span className="text-[11px] text-muted-foreground">{entry.type === 'file' ? formatSize(entry.size) : entry.type}</span></span>
             </button>
-            {entry.type === 'file' && <Button variant="ghost" size="icon-sm" className="mr-2 text-muted-foreground opacity-100 hover:text-destructive md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100" disabled={Boolean(busy)} onClick={() => void deleteFile(entry.name, target)} aria-label={`Move ${entry.name} to recycle bin`} title="Move to recycle bin"><Trash2 /></Button>}
+            {(entry.type === 'file' || entry.type === 'directory') && <Button variant="ghost" size="icon-sm" className="mr-2 text-muted-foreground opacity-100 hover:text-destructive md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100" disabled={Boolean(busy)} onClick={() => setPendingDelete({ name: entry.name, target, type: entry.type === 'directory' ? 'directory' : 'file' })} aria-label={`Move ${entry.name} to recycle bin`} title="Move to recycle bin"><Trash2 /></Button>}
           </div>
         })}
       </div>
@@ -498,7 +650,7 @@ function Files({ server }: { server: ServerView }) {
         {file ? <>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-sidebar px-3 py-2.5 sm:px-4">
             <div className="flex min-w-0 items-center gap-2"><span className={`grid h-7 w-7 shrink-0 place-items-center rounded-md border text-xs ${fileTone(activeName)}`}>▤</span><span className="min-w-0 truncate font-mono text-xs font-semibold text-foreground/80">{activeName}</span><Badge variant="outline" className="rounded-md text-[10px] uppercase tracking-wider">{language.label}</Badge>{dirty && <span className="text-xs text-chart-3">● Unsaved</span>}</div>
-            <div className="flex items-center gap-2"><Button variant="destructive" size="sm" disabled={Boolean(busy)} onClick={() => void deleteFile(activeName, file)}><Trash2 />Recycle</Button><Button size="sm" disabled={!dirty || Boolean(busy)} onClick={() => void save()} title={`Save (${shortcutLabel('S', platform)})`}><Save />{busy === 'Saving…' ? busy : 'Save'} <span className="hidden font-normal opacity-60 sm:inline">{shortcutLabel('S', platform)}</span></Button></div>
+            <div className="flex items-center gap-2"><Button variant="destructive" size="sm" disabled={Boolean(busy)} onClick={() => setPendingDelete({ name: activeName, target: file, type: 'file' })}><Trash2 />Recycle</Button><Button size="sm" disabled={!dirty || Boolean(busy)} onClick={() => void save()} title={`Save (${shortcutLabel('S', platform)})`}><Save />{busy === 'Saving…' ? busy : 'Save'} <span className="hidden font-normal opacity-60 sm:inline">{shortcutLabel('S', platform)}</span></Button></div>
           </div>
           <div className="file-editor min-h-0 flex-1 overflow-hidden">
             <CodeMirror
@@ -522,10 +674,19 @@ function Files({ server }: { server: ServerView }) {
         </> : <div className="flex flex-1 items-center justify-center p-10 text-center"><div><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-border bg-card text-2xl text-muted-foreground">▤</div><p className="mt-4 text-sm font-medium text-foreground/80">Choose a text or config file</p><p className="mt-1 text-xs leading-5 text-muted-foreground">YAML, JSON, properties, TOML, XML, and shell files<br className="hidden sm:block" /> get automatic syntax colours.</p></div></div>}
       </div>
     </div>
+    {pendingDelete && <ConfirmationModal
+      title={`Recycle ${pendingDelete.type}`}
+      message={<>“{pendingDelete.name}” will be moved to the hosted machine’s recycle bin.{pendingDelete.type === 'directory' ? ' The folder and everything inside it will be moved.' : ''}{pendingDelete.target === file && dirty ? ' Unsaved editor changes will also be lost.' : ''}</>}
+      confirmLabel="Move to recycle bin"
+      busyLabel="Moving…"
+      busy={busy === 'Moving to recycle bin…'}
+      onClose={() => setPendingDelete(undefined)}
+      onConfirm={() => void deleteEntry(pendingDelete.name, pendingDelete.target, pendingDelete.type)}
+    />}
   </section>
 }
 
-const playerHeadUrl = (uuid: string) => `https://crafatar.com/avatars/${uuid.replaceAll('-', '')}?size=96&overlay&default=MHF_Steve`
+const playerHeadUrl = (uuid: string) => `https://mc-heads.net/avatar/${uuid.replaceAll('-', '')}/96`
 
 function Players({ server }: { server: ServerView }) {
   const [players, setPlayers] = useState<PlayerView[]>([])
@@ -604,7 +765,7 @@ function Players({ server }: { server: ServerView }) {
               <span className="text-lg text-muted-foreground transition group-hover:translate-x-0.5 group-hover:text-primary">›</span>
             </button>)}</div>}
       </div>
-      <div className="border-t border-border bg-muted/20 px-4 py-2 text-right text-[10px] text-muted-foreground">Player heads by <a className="text-primary hover:underline" href="https://crafatar.com" target="_blank" rel="noreferrer">Crafatar</a></div>
+      <div className="border-t border-border bg-muted/20 px-4 py-2 text-right text-[10px] text-muted-foreground">Player heads by <a className="text-primary hover:underline" href="https://mc-heads.net" target="_blank" rel="noreferrer">MCHeads</a></div>
     </section>
 
     {selected && <Modal title={`Manage ${selected.username}`} onClose={() => { setSelectedUuid(''); setError(''); setNotice('') }}>
@@ -645,15 +806,33 @@ function PasswordForm({ onClose }: { onClose: () => void }) {
   </form>
 }
 
-function Dashboard({ onLogout }: { onLogout: () => void }) {
+function ThemeFooter({ selected, onChange, offset = false }: { selected: AppTheme; onChange: (theme: AppTheme) => void; offset?: boolean }) {
+  return <footer className={`border-t border-border bg-card/40 px-4 py-3 ${offset ? 'lg:ml-72' : ''}`}>
+    <div className="mx-auto flex max-w-7xl items-center justify-between gap-4">
+      <span className="text-xs text-muted-foreground">MineDeck Remote</span>
+      <label className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+        <span>Theme</span>
+        <select aria-label="Theme" className="field h-8 w-auto min-w-36 py-1 text-xs text-foreground" value={selected} onChange={(event) => onChange(event.target.value as AppTheme)}>
+          {appThemes.map((theme) => <option key={theme.id} value={theme.id}>{theme.name}</option>)}
+        </select>
+      </label>
+    </div>
+  </footer>
+}
+
+function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; theme: AppTheme; onThemeChange: (theme: AppTheme) => void }) {
   const [servers, setServers] = useState<ServerView[]>([])
-  const [selectedId, setSelectedId] = useState('')
+  const [serversLoaded, setServersLoaded] = useState(false)
+  const [selectedId, setSelectedId] = useState(serverIdFromPath)
   const [tab, setTab] = useState<(typeof tabs)[number]>('console')
   const [logs, setLogs] = useState<Record<string, string[]>>({})
   const [metricHistory, setMetricHistory] = useState<MetricHistory>({})
   const [connected, setConnected] = useState(false)
+  const [serverAddresses, setServerAddresses] = useState<Record<string, string | null>>({})
   const [addOpen, setAddOpen] = useState(false)
   const [passwordOpen, setPasswordOpen] = useState(false)
+  const [removingId, setRemovingId] = useState('')
+  const [pendingRemoval, setPendingRemoval] = useState<ServerView>()
   const [error, setError] = useState('')
   const [toasts, setToasts] = useState<Toast[]>([])
   const statuses = useRef(new Map<string, ServerStatus>())
@@ -671,7 +850,28 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
       statuses.current = new Map(items.map((server) => [server.id, server.status]))
       setServers(items)
       setMetricHistory((current) => appendMetricHistory(current, items))
-    }).catch((reason) => setError(reason.message))
+      const requestedId = serverIdFromPath()
+      if (requestedId && !items.some((server) => server.id === requestedId)) {
+        window.history.replaceState(null, '', '/')
+        setSelectedId('')
+      }
+      setServersLoaded(true)
+    }).catch((reason) => { setError(reason.message); setServersLoaded(true) })
+  }, [])
+  useEffect(() => {
+    if (!selectedId || tab !== 'console') return
+    void api<{ address: string | null }>(`/api/servers/${selectedId}/address`).then(({ address }) => {
+      setServerAddresses((current) => ({ ...current, [selectedId]: address }))
+    }).catch(() => setServerAddresses((current) => ({ ...current, [selectedId]: null })))
+  }, [selectedId, tab])
+  useEffect(() => {
+    const navigateFromHistory = () => {
+      setSelectedId(serverIdFromPath())
+      setTab('console')
+      setError('')
+    }
+    window.addEventListener('popstate', navigateFromHistory)
+    return () => window.removeEventListener('popstate', navigateFromHistory)
   }, [])
   useEffect(() => {
     if (!selectedId || logs[selectedId]) return
@@ -719,33 +919,58 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
     }
   }
   const logout = async () => { await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined); onLogout() }
-  const remove = async () => {
-    if (!selected || !confirm(`Remove ${selected.name} from MineDeck? Server files will not be deleted.`)) return
-    try { await api(`/api/servers/${selected.id}`, { method: 'DELETE' }); setSelectedId('') }
-    catch (reason) { setError((reason as Error).message) }
+  const remove = async (server: ServerView) => {
+    setRemovingId(server.id)
+    setError('')
+    try {
+      if (server.status !== 'stopped' && server.status !== 'crashed') {
+        if (server.status !== 'stopping') await api(`/api/servers/${server.id}/actions/stop`, { method: 'POST' })
+        await waitUntilServerStops(server.id, (server.stopTimeoutSeconds + 10) * 1_000)
+      }
+      await api(`/api/servers/${server.id}`, { method: 'DELETE' })
+      setServers((items) => items.filter((item) => item.id !== server.id))
+      setLogs((current) => {
+        const next = { ...current }
+        delete next[server.id]
+        return next
+      })
+      statuses.current.delete(server.id)
+      restarting.current.delete(server.id)
+      if (selectedId === server.id) select('')
+      notify({ tone: 'success', title: 'Server removed', message: `${server.name} was removed from MineDeck. Its files were left untouched.` })
+    } catch (reason) {
+      const message = (reason as Error).message
+      setError(message)
+      notify({ tone: 'error', title: 'Could not remove server', message }, `server:${server.id}`)
+    } finally { setRemovingId(''); setPendingRemoval(undefined) }
   }
-  const select = (id: string) => { setSelectedId(id); setTab('console'); setError('') }
+  const select = (id: string) => {
+    window.history.pushState(null, '', id ? `/servers/${encodeURIComponent(id)}` : '/')
+    setSelectedId(id)
+    setTab('console')
+    setError('')
+  }
 
-  return <div className="min-h-screen bg-background text-foreground">
+  return <div className="flex min-h-screen flex-col bg-background text-foreground">
     <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
-    <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground lg:flex">
+    {selected && <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground lg:flex">
       <div className="border-b border-sidebar-border p-5"><Logo /></div>
       <div className="border-b border-sidebar-border p-4">
-        {selected ? <div className="rounded-lg bg-sidebar-accent p-3 text-sidebar-accent-foreground"><div className="flex items-center gap-3"><span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusStyle[selected.status]}`} /><div className="min-w-0 flex-1"><div className="truncate text-sm font-semibold">{selected.name}</div><div className="text-xs text-muted-foreground">{prettyStatus(selected.status)}</div></div></div><Button variant="ghost" size="sm" className="mt-3 w-full" onClick={() => select('')}>Change server</Button></div> : <div className="rounded-lg border border-dashed border-sidebar-border px-3 py-4 text-center text-sm text-muted-foreground">Select a server to continue</div>}
+        <div className="rounded-lg bg-sidebar-accent p-3 text-sidebar-accent-foreground"><div className="flex items-center gap-3"><span className={`h-2.5 w-2.5 shrink-0 rounded-full ${statusStyle[selected.status]}`} /><div className="min-w-0 flex-1"><div className="truncate text-sm font-semibold">{selected.name}</div><div className="text-xs text-muted-foreground">{prettyStatus(selected.status)}</div></div></div><Button variant="ghost" size="sm" className="mt-3 w-full" onClick={() => select('')}>Change server</Button></div>
       </div>
       <nav className="flex-1 p-3">
         <div className="flex items-center justify-between px-3 pb-2 pt-1"><span className="text-[11px] font-bold uppercase tracking-[.18em] text-muted-foreground">Server</span><span className={`flex items-center gap-1.5 text-[11px] ${connected ? 'text-muted-foreground' : 'text-chart-3'}`}><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-chart-2' : 'bg-chart-3'}`} />{connected ? 'Live' : 'Reconnecting'}</span></div>
-        {tabs.map((item) => <button key={item} disabled={!selected} onClick={() => setTab(item)} className={`mb-1 flex w-full items-center rounded-lg border px-4 py-3 text-left text-sm font-semibold capitalize transition ${tab === item && selected ? 'border-sidebar-border bg-sidebar-accent text-sidebar-accent-foreground' : 'border-transparent text-muted-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'} disabled:pointer-events-none disabled:opacity-50`}>{item}</button>)}
+        {tabs.map((item) => <button key={item} onClick={() => setTab(item)} className={`mb-1 flex w-full items-center rounded-lg border px-4 py-3 text-left text-sm font-semibold capitalize transition ${tab === item ? 'border-sidebar-border bg-sidebar-accent text-sidebar-accent-foreground' : 'border-transparent text-muted-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}>{item}</button>)}
       </nav>
       <div className="space-y-2 border-t border-sidebar-border p-3"><Button className="w-full" size="lg" onClick={() => setAddOpen(true)}><Plus />Add server</Button><div className="grid grid-cols-2 gap-2"><Button variant="ghost" size="sm" onClick={() => setPasswordOpen(true)}><KeyRound />Password</Button><Button variant="ghost" size="sm" onClick={() => void logout()}><LogOut />Sign out</Button></div></div>
-    </aside>
+    </aside>}
 
     <header className="sticky top-0 z-20 border-b border-border bg-background/90 px-4 py-3 backdrop-blur lg:hidden">
       <div className="flex items-center gap-3"><Logo compact /><select aria-label="Select server" className="field min-w-0 flex-1 py-2" value={selectedId} onChange={(event) => select(event.target.value)}><option value="">Select a server</option>{servers.map((server) => <option key={server.id} value={server.id}>{server.name} · {prettyStatus(server.status)}</option>)}</select><Button size="icon-lg" onClick={() => setAddOpen(true)} aria-label="Add server"><Plus /></Button><Button variant="outline" size="icon-lg" onClick={() => setPasswordOpen(true)} aria-label="Account settings"><Settings /></Button></div>
     </header>
 
-    <main className="min-h-screen lg:ml-72">
-      {selected ? <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8">
+    <main className={`flex-1 ${selected ? 'lg:ml-72' : ''}`}>
+      {!serversLoaded ? <div className="flex min-h-[70vh] items-center justify-center"><div className="brand-cube h-10 w-10 animate-pulse rounded-xl" /></div> : selected ? <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8">
         <div className="mb-6 flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
           <div className="min-w-0"><div className="flex flex-wrap items-center gap-3"><h1 className="truncate text-2xl font-black tracking-tight text-foreground sm:text-3xl">{selected.name}</h1><Badge variant="outline" className="gap-2 px-3 py-1"><span className={`h-2 w-2 rounded-full ${statusStyle[selected.status]}`} />{prettyStatus(selected.status)}</Badge></div><p className="mt-2 truncate font-mono text-xs text-muted-foreground">{selected.directory}</p></div>
           <div className="flex flex-wrap gap-2">
@@ -764,13 +989,34 @@ function Dashboard({ onLogout }: { onLogout: () => void }) {
           <div className="flex overflow-auto">{tabs.map((item) => <button key={item} className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize transition ${tab === item ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setTab(item)}>{item}</button>)}</div>
           <span className={`hidden items-center gap-1.5 text-xs sm:flex ${connected ? 'text-muted-foreground' : 'text-chart-3'}`}><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-chart-2' : 'bg-chart-3'}`} />{connected ? 'Live' : 'Reconnecting'}</span>
         </div>
-        {tab === 'console' && <Console server={selected} lines={logs[selected.id] ?? []} samples={metricHistory[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
+        {tab === 'console' && <Console key={selected.id} server={selected} address={serverAddresses[selected.id]} lines={logs[selected.id] ?? []} samples={metricHistory[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
         {tab === 'players' && <Players server={selected} />}
         {tab === 'files' && <Files server={selected} />}
-        {tab === 'configuration' && <Card className="gap-0 overflow-hidden py-0"><div className="border-b border-border px-5 py-4"><h2 className="font-bold text-card-foreground">Server configuration</h2><p className="mt-1 text-xs text-muted-foreground">Stop the server before changing launch settings.</p></div><ServerForm server={selected} onSaved={(saved) => setServers((items) => items.map((item) => item.id === saved.id ? saved : item))} onDelete={() => void remove()} /></Card>}
-      </div> : servers.length ? <div className="mx-auto max-w-5xl p-6 sm:p-10 lg:p-14"><div className="flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl font-black tracking-tight text-foreground">Select a server</h1><p className="mt-2 text-sm text-muted-foreground">Choose a server before opening its console, files, or configuration.</p></div><Button onClick={() => setAddOpen(true)}><Plus />Add server</Button></div><div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{servers.map((server) => <button key={server.id} onClick={() => select(server.id)} className="panel flex items-center gap-4 p-5 text-left transition hover:border-primary/50 hover:bg-muted/50"><span className={`h-3 w-3 shrink-0 rounded-full ${statusStyle[server.status]} ${server.status === 'running' ? 'shadow-[0_0_10px_#50fa7b]' : ''}`} /><span className="min-w-0 flex-1"><span className="block truncate font-bold text-card-foreground">{server.name}</span><span className="mt-1 block text-xs text-muted-foreground">{prettyStatus(server.status)}</span></span><span className="text-xl text-muted-foreground">›</span></button>)}</div></div> : <div className="flex min-h-screen items-center justify-center p-6"><div className="max-w-sm text-center"><div className="brand-cube mx-auto h-16 w-16 rounded-2xl" /><h1 className="mt-6 text-2xl font-bold text-foreground">Add your first server</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">Point MineDeck at an existing Minecraft server folder to manage it from this dashboard.</p><Button className="mt-6" size="lg" onClick={() => setAddOpen(true)}><Plus />Add server</Button><Button variant="ghost" className="mt-6 w-full lg:hidden" size="sm" onClick={() => void logout()}><LogOut />Sign out</Button></div></div>}
+        {tab === 'configuration' && <Card className="gap-0 overflow-hidden py-0"><div className="border-b border-border px-5 py-4"><h2 className="font-bold text-card-foreground">Server configuration</h2><p className="mt-1 text-xs text-muted-foreground">Stop the server before changing launch settings.</p></div><ServerForm server={selected} onSaved={(saved) => setServers((items) => items.map((item) => item.id === saved.id ? saved : item))} onDelete={() => setPendingRemoval(selected)} /></Card>}
+      </div> : servers.length ? <div className="mx-auto max-w-5xl p-6 sm:p-10 lg:p-14"><div className="flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl font-black tracking-tight text-foreground">Select a server</h1><p className="mt-2 text-sm text-muted-foreground">Choose a server before opening its console, files, or configuration.</p></div><Button onClick={() => setAddOpen(true)}><Plus />Add server</Button></div>{error && <Alert variant="destructive" className="mt-5"><AlertDescription>{error}</AlertDescription></Alert>}<div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{servers.map((server) => {
+        return <div key={server.id} className="panel group flex items-center transition hover:border-primary/50 hover:bg-muted/50">
+          <button onClick={() => select(server.id)} className="flex min-w-0 flex-1 items-center gap-4 p-5 text-left">
+            <span className={`h-3 w-3 shrink-0 rounded-full ${statusStyle[server.status]} ${server.status === 'running' ? 'shadow-[0_0_10px_var(--chart-2)]' : ''}`} />
+            <span className="min-w-0 flex-1"><span className="block truncate font-bold text-card-foreground">{server.name}</span><span className="mt-1 block text-xs text-muted-foreground">{prettyStatus(server.status)}</span></span>
+            <span className="text-xl text-muted-foreground">›</span>
+          </button>
+          <Button variant="ghost" size="icon-sm" className="mr-3 text-muted-foreground hover:text-destructive" disabled={Boolean(removingId)} onClick={() => setPendingRemoval(server)} aria-label={`Remove ${server.name}`} title={`Remove ${server.name}`}><Trash2 /></Button>
+        </div>
+      })}</div></div> : <div className="flex min-h-[70vh] items-center justify-center p-6"><div className="max-w-sm text-center"><div className="brand-cube mx-auto h-16 w-16 rounded-2xl" /><h1 className="mt-6 text-2xl font-bold text-foreground">Add your first server</h1><p className="mt-2 text-sm leading-6 text-muted-foreground">Point MineDeck at an existing Minecraft server folder to manage it from this dashboard.</p><Button className="mt-6" size="lg" onClick={() => setAddOpen(true)}><Plus />Add server</Button><Button variant="ghost" className="mt-6 w-full lg:hidden" size="sm" onClick={() => void logout()}><LogOut />Sign out</Button></div></div>}
     </main>
-    {addOpen && <Modal title="Add Minecraft server" onClose={() => setAddOpen(false)}><ServerForm onCancel={() => setAddOpen(false)} onSaved={(server) => { setServers((items) => [...items, server]); setSelectedId(server.id); setAddOpen(false) }} /></Modal>}
+    <ThemeFooter selected={theme} onChange={onThemeChange} offset={Boolean(selected)} />
+    {pendingRemoval && <ConfirmationModal
+      title={`Remove ${pendingRemoval.name}?`}
+      message={pendingRemoval.status === 'stopped' || pendingRemoval.status === 'crashed'
+        ? <>This removes the server from MineDeck. Its server folder and every file inside it will remain untouched.</>
+        : <>MineDeck will gracefully stop this server, then remove it from the dashboard. Its server folder and every file inside it will remain untouched.</>}
+      confirmLabel={pendingRemoval.status === 'stopped' || pendingRemoval.status === 'crashed' ? 'Remove server' : 'Stop and remove'}
+      busyLabel={pendingRemoval.status === 'stopped' || pendingRemoval.status === 'crashed' ? 'Removing…' : 'Stopping and removing…'}
+      busy={removingId === pendingRemoval.id}
+      onClose={() => setPendingRemoval(undefined)}
+      onConfirm={() => void remove(pendingRemoval)}
+    />}
+    {addOpen && <Modal title="Add Minecraft server" onClose={() => setAddOpen(false)}><ServerForm onCancel={() => setAddOpen(false)} onSaved={(server) => { setServers((items) => [...items, server]); select(server.id); setAddOpen(false) }} /></Modal>}
     {passwordOpen && <Modal title="Change admin password" onClose={() => setPasswordOpen(false)}><PasswordForm onClose={() => setPasswordOpen(false)} /><div className="border-t border-border px-5 py-4 text-center lg:hidden"><Button variant="ghost" className="text-destructive" onClick={() => void logout()}><LogOut />Sign out of MineDeck</Button></div></Modal>}
   </div>
 }
@@ -781,7 +1027,16 @@ function Metric({ label, value, detail, className = '' }: { label: string; value
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
+  const [theme, setTheme] = useState<AppTheme>(storedTheme)
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+    try { localStorage.setItem('minedeck-theme', theme) } catch { /* Storage can be unavailable in private browsing. */ }
+    const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+    themeColor?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--background').trim())
+  }, [theme])
   useEffect(() => { void api<{ authenticated: boolean }>('/api/auth/session').then(({ authenticated }) => setAuthenticated(authenticated)).catch(() => setAuthenticated(false)) }, [])
-  if (authenticated === null) return <div className="flex min-h-screen items-center justify-center bg-background"><div className="brand-cube h-10 w-10 animate-pulse rounded-xl" /></div>
-  return authenticated ? <Dashboard onLogout={() => setAuthenticated(false)} /> : <Login onLogin={() => setAuthenticated(true)} />
+  if (authenticated === null) return <div className="flex min-h-screen flex-col bg-background"><div className="flex flex-1 items-center justify-center"><div className="brand-cube h-10 w-10 animate-pulse rounded-xl" /></div><ThemeFooter selected={theme} onChange={setTheme} /></div>
+  return authenticated
+    ? <Dashboard onLogout={() => setAuthenticated(false)} theme={theme} onThemeChange={setTheme} />
+    : <Login onLogin={() => setAuthenticated(true)} theme={theme} onThemeChange={setTheme} />
 }

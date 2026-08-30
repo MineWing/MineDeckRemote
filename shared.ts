@@ -42,6 +42,15 @@ export interface PlayerView {
   isBanned: boolean
 }
 
+export interface PaperBuild {
+  id: number
+  time: string
+  name: string
+  size: number
+  sha256: string
+  url: string
+}
+
 export type PlayerAction = 'op' | 'deop' | 'remove-whitelist' | 'kick' | 'ban'
 
 export type SocketEvent =

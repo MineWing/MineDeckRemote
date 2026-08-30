@@ -9,7 +9,12 @@
   "scripts": {
     "dev": "concurrently -k \"tsx watch server/index.ts\" \"vite --host 0.0.0.0\"",
     "build": "tsc --noEmit && vite build",
-    "start": "NODE_ENV=production tsx server/index.ts",
+    "start": "tsx scripts/host.ts",
+    "serve": "NODE_ENV=production tsx server/index.ts",
+    "service:install": "npm run build && tsx scripts/service.ts install",
+    "service:restart": "npm run build && tsx scripts/service.ts restart",
+    "service:status": "tsx scripts/service.ts status",
+    "service:uninstall": "tsx scripts/service.ts uninstall",
     "test": "tsx --test server/*.test.ts"
   },
   "dependencies": {
