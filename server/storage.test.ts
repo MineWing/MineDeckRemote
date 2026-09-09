@@ -42,15 +42,20 @@ test('concurrent editors cannot both save the same version and rejected saves le
   const directory = await mkdtemp(join(tmpdir(), 'minedeck-storage-'))
   const path = join(directory, 'server.properties')
   await writeFile(path, 'original')
-  const results = await Promise.allSettled([
-    saveEditableFile(path, 'first', fileVersion('original'), max),
-    saveEditableFile(path, 'second', fileVersion('original'), max),
-  ])
-  assert.equal(results[0]?.status, 'fulfilled')
-  assert.equal(results[1]?.status, 'rejected')
-  if (results[1]?.status === 'rejected') assert.equal(results[1].reason.statusCode, 409)
-  assert.equal(await readFile(path, 'utf8'), 'first')
-  await saveEditableFile(path, 'third', fileVersion('first'), max)
+  const contents = ['first', 'second']
+  const results = await Promise.allSettled(contents.map((content) =>
+    saveEditableFile(path, content, fileVersion('original'), max),
+  ))
+  // Path resolution can finish in either order before writers enter the save queue.
+  const fulfilled = results.filter((result) => result.status === 'fulfilled')
+  const rejected = results.filter((result) => result.status === 'rejected')
+  assert.equal(fulfilled.length, 1)
+  assert.equal(rejected.length, 1)
+  assert.equal(rejected[0]!.reason.statusCode, 409)
+  const winner = contents[results.findIndex((result) => result.status === 'fulfilled')]!
+  assert.equal(fulfilled[0]!.value, fileVersion(winner))
+  assert.equal(await readFile(path, 'utf8'), winner)
+  await saveEditableFile(path, 'third', fileVersion(winner), max)
   assert.equal(await readFile(path, 'utf8'), 'third')
 })
 
