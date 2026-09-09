@@ -10,7 +10,7 @@ import { consoleLineTokens } from '@/lib/console'
 import type { FileEntry, PaperBuild, PlayerAction, PlayerView, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
 
 import { Dialog } from 'radix-ui'
-import { mergeLogHistory, type LogHistory } from './lib/log-history'
+import { appendLogLine, mergeLogHistory, type LogHistory, type LegacyLogSnapshot } from './lib/log-history'
 import { copyText } from './lib/clipboard'
 const FileEditor = lazy(() => import('./FileEditor'))
 
@@ -842,7 +842,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
   useEffect(() => {
     if (!selectedId || !connection) return
     let active = true
-    void api<LogHistory>(`/api/servers/${selectedId}/console`).then((snapshot) => {
+    void api<LogHistory | LegacyLogSnapshot>(`/api/servers/${selectedId}/console`).then((snapshot) => {
       if (active) setLogs((current) => ({ ...current, [selectedId]: mergeLogHistory(current[selectedId], snapshot) }))
     }).catch((reason) => { if (active) setError(`Could not load console history: ${reason.message}`) })
     return () => { active = false }
@@ -868,7 +868,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
           statuses.current = new Map(event.servers.map((server) => [server.id, server.status]))
           setServers(event.servers)
           setMetricHistory((current) => appendMetricHistory(current, event.servers))
-        } else setLogs((current) => ({ ...current, [event.serverId]: mergeLogHistory(current[event.serverId], {epoch:event.epoch,entries:[{sequence:event.sequence,line:event.line}]}) }))
+        } else setLogs((current) => ({ ...current, [event.serverId]: appendLogLine(current[event.serverId], event) }))
       }
       socket.onclose = () => {
         if (!active) return
