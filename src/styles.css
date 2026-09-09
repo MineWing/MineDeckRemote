@@ -423,3 +423,31 @@
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
 }
+
+/* Text has its own palette: decorative chart colors may be too dark to read. */
+.dark {
+  --text-chart-1: #cbb5ff;
+  --text-chart-2: #90e8b0;
+  --text-chart-3: #ffd28a;
+  --text-chart-4: #efb1dc;
+  --text-chart-5: #a5dfff;
+  --destructive-foreground: #141412;
+}
+.dark[data-theme="tiesen"] {
+  --primary: #a6b8ff;
+  --primary-foreground: #141412;
+  --sidebar-primary: #a6b8ff;
+  --sidebar-primary-foreground: #141412;
+}
+.dark[data-theme="2077"] { --sidebar-primary-foreground: #000; }
+.dark[data-theme="nlan"] { --secondary-foreground: #00050d; }
+.dark[data-theme="discord"] { --primary: #adb7ff; --primary-foreground: #141412; }
+.dark[data-theme="terminal"] {
+  --muted-foreground: #79b6a2;
+}
+.dark .text-chart-1 { color: var(--text-chart-1); }
+.dark .text-chart-2 { color: var(--text-chart-2); }
+.dark .text-chart-3 { color: var(--text-chart-3); }
+.dark .text-chart-4 { color: var(--text-chart-4); }
+.dark .text-chart-5 { color: var(--text-chart-5); }
+.dark[data-theme] { --destructive: #ffaaaa; --destructive-foreground: #141412; }

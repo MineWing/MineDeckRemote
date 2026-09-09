@@ -88,6 +88,8 @@ npm run service:uninstall
 
 `service:restart` builds the current source before restarting. Restarting or uninstalling the service gracefully stops any running Minecraft servers. Standard output and errors are saved to `data/minedeck.stdout.log` and `data/minedeck.stderr.log`. Uninstalling moves the LaunchAgent to Trash and leaves MineDeck, its configuration, logs, and server folders untouched.
 
+After upgrading from an older release, run `npm run service:install` once to update the LaunchAgent's shutdown allowance to 135 seconds. Existing installations retain their previous allowance until reinstalled. Service restart requests a graceful stop; the replacement host starts after the previous one exits.
+
 ## Add a Minecraft server
 
 Choose **Download Paper** to create a server folder without downloading a JAR manually. Select a Minecraft version and stable Paper build; MineDeck downloads it from PaperMC, verifies its advertised size and SHA-256 checksum, and registers it as the server JAR. Existing files are never overwritten. Paper is the only downloadable server type currently supported.
@@ -107,7 +109,7 @@ The RAM allocation slider adjusts maximum heap in 256 MB steps and keeps minimum
 
 With **Manual setup**, MineDeck creates the server directory (including missing parent folders) when necessary. The server can be added before its configured JAR exists, allowing the JAR to be uploaded afterward from the Files tab; it cannot be started until that JAR is present. **Import existing** continues to require an existing directory and server JAR.
 
-The file browser is confined to that server folder, including through symbolic links. It syntax-highlights YAML, JSON, properties, TOML, XML, and shell files and edits text files up to 2 MB. Editor shortcuts follow the browser platform: Windows and Linux use `Ctrl` while macOS uses `⌘`. Uploads support up to 20 files at a time and 512 MB per file. Uploaded files never overwrite an existing name. Deleting a file or folder sends it to the Trash or Recycle Bin of the machine running MineDeck; the API does not permanently unlink it, and it will never recycle the configured server root folder.
+The file browser is confined to that server folder, including through symbolic links. It syntax-highlights YAML, JSON, properties, TOML, XML, and shell files and edits text files up to 2 MB. Saves write a complete replacement before replacing the original, and reject stale edits if the file changed since it was opened. Unsaved edits prompt before leaving the editor. Failed saves may leave a sibling `.minedeck-save-*.tmp` recovery file in the server folder; these are not deleted automatically. Editor shortcuts follow the browser platform: Windows and Linux use `Ctrl` while macOS uses `⌘`. Uploads support up to 20 files at a time and 512 MB per file. Uploaded files never overwrite an existing name. Deleting a file or folder sends it to the Trash or Recycle Bin of the machine running MineDeck; the API does not permanently unlink it, and it will never recycle the configured server root folder.
 
 ## HTTPS and settings
 
@@ -128,7 +130,7 @@ Other settings:
 | `MINEDECK_DATA` | `data/minedeck.json` | JSON data file |
 | `MINEDECK_MDNS_HOST` | disabled (`minedeck.local` for the background service) | Bonjour hostname advertised on the local network |
 
-Stopping MineDeck gracefully stops its managed servers before exiting. Login sessions are intentionally memory-only, so an app restart signs browsers out.
+Stopping MineDeck gracefully stops its managed servers before exiting, allowing each server its configured stop timeout. Login sessions expire after 12 hours and are intentionally memory-only, so an app restart signs browsers out. Logout, password changes, and expiry also disconnect the affected live console connections.
 
 ## Development
 

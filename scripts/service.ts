@@ -92,7 +92,7 @@ ${Object.entries(environment).map(([name, value]) => `    <key>${xml(name)}</key
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>ExitTimeOut</key>
-  <integer>30</integer>
+  <integer>135</integer>
   <key>StandardOutPath</key>
   <string>${xml(stdoutPath)}</string>
   <key>StandardErrorPath</key>
@@ -129,8 +129,9 @@ const install = async () => {
 
 const restart = () => {
   if (!loaded()) throw new Error('MineDeck is not installed as a service. Run npm run service:install first.')
-  checkedLaunchctl('kickstart', '-k', service)
-  console.log('MineDeck restarted.')
+  // KeepAlive starts the replacement only after this host finishes graceful shutdown.
+  checkedLaunchctl('kill', 'SIGTERM', service)
+  console.log('MineDeck restart requested; the replacement starts after managed servers stop.')
 }
 
 const status = async () => {

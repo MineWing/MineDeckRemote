@@ -1,6 +1,5 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { once } from 'node:events'
 import { realpath } from 'node:fs/promises'
 import { promisify } from 'node:util'
 import type { ServerConfig, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
@@ -54,15 +53,20 @@ interface Runtime {
   onlinePlayers: number
   onlinePlayerNames: Set<string>
   console: string[]
+  consoleSequence: number
   manualStop: boolean
+  restartRequested?: symbol
   stopTimer?: NodeJS.Timeout
   restartTimer?: NodeJS.Timeout
 }
 
 export class ServerManager {
+  private consoleEpoch = randomUUID()
   private states = new Map<string, Runtime>()
   private metricsTimer: NodeJS.Timeout
   private metricsBusy = false
+  private operations: Promise<unknown> = Promise.resolve()
+  private shuttingDown = false
 
   constructor(
     private data: StoredData,
@@ -88,6 +92,17 @@ export class ServerManager {
     return this.state(id).console
   }
 
+  getConsoleSnapshot(id: string) {
+    this.get(id)
+    const state = this.state(id)
+    return {
+      epoch: this.consoleEpoch,
+      entries: state.console.map((line, index) => ({
+        sequence: state.consoleSequence - state.console.length + index + 1, line,
+      })),
+    }
+  }
+
   listPlayers(id: string) {
     const server = this.get(id)
     return readPlayers(server.directory, this.state(id).onlinePlayerNames)
@@ -107,12 +122,20 @@ export class ServerManager {
     return { ok: true }
   }
 
-  async add(config: ServerConfig) {
+  add(config: ServerConfig) {
+    return this.transaction(() => this.addConfig(config))
+  }
+
+  private async addConfig(config: ServerConfig) {
     await this.checkAdd(config)
     config.id = randomUUID()
     this.data.servers.push(config)
     this.state(config.id)
-    await this.save()
+    try { await this.save() } catch (error) {
+      this.data.servers.splice(this.data.servers.indexOf(config), 1)
+      this.states.delete(config.id)
+      throw error
+    }
     this.changed()
     return this.view(config)
   }
@@ -124,35 +147,59 @@ export class ServerManager {
     await this.ensureUniqueTarget(config)
   }
 
-  async update(id: string, config: ServerConfig) {
+  update(id: string, config: ServerConfig) {
+    return this.transaction(() => this.updateConfig(id, config))
+  }
+
+  private async updateConfig(id: string, config: ServerConfig) {
     const current = this.get(id)
-    if (this.state(id).process) throw new InputError('Stop the server before changing its configuration', 409)
+    if (this.state(id).process || this.state(id).restartRequested) throw new InputError('Stop the server before changing its configuration', 409)
     if (this.data.servers.some((server) => server.id !== id && server.name.toLowerCase() === config.name.toLowerCase())) {
       throw new InputError('A server with this name already exists', 409)
     }
     await this.ensureUniqueTarget(config, id)
+    const previous = { ...current }
     Object.assign(current, config, { id: current.id, createdAt: current.createdAt })
-    await this.save()
+    try { await this.save() } catch (error) {
+      Object.assign(current, previous)
+      throw error
+    }
     this.changed()
     return this.view(current)
   }
 
-  async remove(id: string) {
+  remove(id: string) {
+    return this.transaction(() => this.removeConfig(id))
+  }
+
+  private async removeConfig(id: string) {
     const server = this.get(id)
     const state = this.state(id)
-    if (state.process) throw new InputError('Stop the server before removing it', 409)
-    if (state.restartTimer) clearTimeout(state.restartTimer)
-    this.data.servers.splice(this.data.servers.indexOf(server), 1)
+    if (state.process || state.restartRequested) throw new InputError('Stop the server before removing it', 409)
+    const index = this.data.servers.indexOf(server)
+    const stats = this.data.stats[id]
+    this.data.servers.splice(index, 1)
     delete this.data.stats[id]
+    try { await this.save() } catch (error) {
+      this.data.servers.splice(index, 0, server)
+      if (stats) this.data.stats[id] = stats
+      throw error
+    }
+    if (state.restartTimer) clearTimeout(state.restartTimer)
+    state.restartTimer = undefined
     this.states.delete(id)
-    await this.save()
     this.changed()
   }
 
-  async start(id: string) {
+  start(id: string) {
+    return this.transaction(() => this.startProcess(id))
+  }
+
+  private async startProcess(id: string, restarting = false) {
+    if (this.shuttingDown) throw new InputError('Host is shutting down', 409)
     const config = this.get(id)
     const state = this.state(id)
-    if (state.process || state.status === 'starting' || state.status === 'running' || state.status === 'stopping') {
+    if ((!restarting && state.restartRequested) || state.process || state.status === 'starting' || state.status === 'running' || state.status === 'stopping') {
       throw new InputError('Server is already running or changing state', 409)
     }
     const target = await this.target(config)
@@ -162,7 +209,9 @@ export class ServerManager {
       }
     }
     if (state.restartTimer) clearTimeout(state.restartTimer)
+    state.restartTimer = undefined
 
+    if (this.shuttingDown) throw new InputError('Host is shutting down', 409)
     const child = spawn(
       config.javaPath,
       serverLaunchArguments(config),
@@ -180,12 +229,38 @@ export class ServerManager {
     this.pipe(id, child.stdout)
     this.pipe(id, child.stderr, 'stderr: ')
     child.once('error', (error) => this.log(id, `MineDeck: ${error.message}`))
+    child.stdin.on('error', (error) => this.log(id, `MineDeck: command failed: ${error.message}`))
     child.once('close', (code, signal) => void this.closed(id, child, code, signal))
     this.changed()
     return this.view(config)
   }
 
   stop(id: string) {
+    return this.transaction(async () => {
+      this.get(id)
+      const state = this.state(id)
+      if (this.cancelAutomaticRestart(id) && !state.process) return
+      if (state.restartRequested) {
+        state.restartRequested = undefined
+        if (state.status === 'stopping') return
+      }
+      this.stopProcess(id)
+    })
+  }
+
+  private cancelAutomaticRestart(id: string) {
+    const state = this.state(id)
+    if (!state.restartTimer) return false
+    clearTimeout(state.restartTimer)
+    state.restartTimer = undefined
+    state.manualStop = true
+    if (!state.process) state.status = 'stopped'
+    this.log(id, 'MineDeck: automatic restart cancelled')
+    this.changed()
+    return true
+  }
+
+  private stopProcess(id: string) {
     const config = this.get(id)
     const state = this.state(id)
     if (!state.process) throw new InputError('Server is not running', 409)
@@ -202,21 +277,38 @@ export class ServerManager {
   }
 
   async restart(id: string) {
-    const state = this.state(id)
-    if (!state.process) return this.start(id)
-    const exited = once(state.process, 'close')
-    this.stop(id)
-    await exited
-    return this.start(id)
+    const request = await this.transaction(async () => {
+      this.get(id)
+      const state = this.state(id)
+      if (state.restartRequested) throw new InputError('Server is already restarting', 409)
+      if (!state.process) return { view: await this.startProcess(id) }
+      const exited = new Promise<void>((resolve) => state.process!.once('close', () => resolve()))
+      if (state.status !== 'stopping') this.stopProcess(id)
+      const token = Symbol('restart')
+      state.restartRequested = token
+      return { state, exited, token }
+    })
+    if ('view' in request) return request.view!
+    // Do not hold the persistence queue during a potentially 120-second stop.
+    await request.exited
+    return this.transaction(async () => {
+      if (request.state.restartRequested !== request.token) throw new InputError('Restart was cancelled', 409)
+      try { return await this.startProcess(id, true) }
+      finally { request.state.restartRequested = undefined }
+    })
   }
 
   kill(id: string) {
-    this.get(id)
-    const state = this.state(id)
-    if (!state.process) throw new InputError('Server is not running', 409)
-    state.manualStop = true
-    this.log(id, 'MineDeck: force-killing the process')
-    if (!state.process.kill('SIGKILL')) throw new InputError('Could not kill the server process', 500)
+    return this.transaction(async () => {
+      this.get(id)
+      const state = this.state(id)
+      if (this.cancelAutomaticRestart(id) && !state.process) return
+      if (!state.process) throw new InputError('Server is not running', 409)
+      state.manualStop = true
+      state.restartRequested = undefined
+      this.log(id, 'MineDeck: force-killing the process')
+      if (!state.process.kill('SIGKILL')) throw new InputError('Could not kill the server process', 500)
+    })
   }
 
   command(id: string, command: unknown) {
@@ -234,22 +326,34 @@ export class ServerManager {
   }
 
   async shutdown() {
+    this.shuttingDown = true
     clearInterval(this.metricsTimer)
+    await this.operations
     const waits: Promise<unknown>[] = []
     for (const [id, state] of this.states) {
       if (state.restartTimer) clearTimeout(state.restartTimer)
+      state.restartTimer = undefined
       if (!state.process) continue
-      const exited = once(state.process, 'close')
-      try { this.stop(id) } catch { /* already stopping */ }
-      waits.push(Promise.race([exited, new Promise((done) => setTimeout(done, 8_000))]).then(() => state.process?.kill('SIGKILL')))
+      // Normal stop owns the configured deadline, including a stop already underway.
+      const exited = new Promise<void>((resolve) => state.process!.once('close', () => resolve()))
+      if (state.status !== 'stopping') this.stopProcess(id)
+      waits.push(exited)
     }
-    await Promise.allSettled(waits)
+    await Promise.all(waits)
+    await this.operations
+  }
+
+  // Persisted mutations, including account changes, share one rollback boundary.
+  transaction<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.operations.then(operation)
+    this.operations = result.catch(() => undefined)
+    return result
   }
 
   private state(id: string) {
     let state = this.states.get(id)
     if (!state) {
-      state = { status: 'stopped', cpuPercent: 0, memoryMb: 0, onlinePlayers: 0, onlinePlayerNames: new Set(), console: [], manualStop: false }
+      state = { status: 'stopped', cpuPercent: 0, memoryMb: 0, onlinePlayers: 0, onlinePlayerNames: new Set(), console: [], consoleSequence: 0, manualStop: false, restartRequested: undefined }
       this.states.set(id, state)
     }
     return state
@@ -306,6 +410,7 @@ export class ServerManager {
       state.onlinePlayers = players.count
       state.onlinePlayerNames = new Set(players.names)
     }
+    state.consoleSequence++
     state.console.push(line)
     if (state.console.length > MAX_CONSOLE_LINES) state.console.splice(0, state.console.length - MAX_CONSOLE_LINES)
     const joined = line.match(/:\s*([A-Za-z0-9_]{1,16}) joined the game$/i)
@@ -323,7 +428,7 @@ export class ServerManager {
       state.status = 'running'
       this.changed()
     }
-    this.publish({ type: 'console', serverId: id, line })
+    this.publish({ type: 'console', serverId: id, line, sequence: state.consoleSequence, epoch: this.consoleEpoch })
   }
 
   private async closed(id: string, process: ChildProcessWithoutNullStreams, code: number | null, signal: NodeJS.Signals | null) {
@@ -340,19 +445,32 @@ export class ServerManager {
     state.status = manual ? 'stopped' : 'crashed'
     this.log(id, `MineDeck: process exited${code === null ? '' : ` with code ${code}`}${signal ? ` (${signal})` : ''}`)
 
-    const config = this.data.servers.find((server) => server.id === id)
-    if (!manual && config) {
-      const stats = this.data.stats[id] ?? { crashCount: 0, lastCrashAt: null, exitCode: null }
-      stats.crashCount++
-      stats.lastCrashAt = new Date().toISOString()
-      stats.exitCode = code
-      this.data.stats[id] = stats
-      await this.save()
-      if (config.autoRestart) {
-        this.log(id, 'MineDeck: automatic restart in 5 seconds')
-        state.restartTimer = setTimeout(() => void this.start(id).catch((error) => this.log(id, `MineDeck: restart failed: ${error.message}`)), 5_000)
+    await this.transaction(async () => {
+      const config = this.data.servers.find((server) => server.id === id)
+      if (!manual && config) {
+        const previous = this.data.stats[id]
+        this.data.stats[id] = {
+          crashCount: (previous?.crashCount ?? 0) + 1,
+          lastCrashAt: new Date().toISOString(),
+          exitCode: code,
+        }
+        try { await this.save() } catch (error) {
+          if (previous) this.data.stats[id] = previous
+          else delete this.data.stats[id]
+          this.log(id, `MineDeck: could not save crash statistics: ${(error as Error).message}`)
+        }
+        if (config.autoRestart && !this.shuttingDown && !state.process && state.status === 'crashed') {
+          this.log(id, 'MineDeck: automatic restart in 5 seconds')
+          const timer = setTimeout(() => void this.transaction(async () => {
+            // A stop may cancel the timer after it fires but before this transaction runs.
+            if (state.restartTimer !== timer) return
+            state.restartTimer = undefined
+            await this.startProcess(id)
+          }).catch((error) => this.log(id, `MineDeck: restart failed: ${error.message}`)), 5_000)
+          state.restartTimer = timer
+        }
       }
-    }
+    })
     this.changed()
   }
 

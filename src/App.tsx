@@ -1,15 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import CodeMirror from '@uiw/react-codemirror'
-import { json } from '@codemirror/lang-json'
-import { xml } from '@codemirror/lang-xml'
-import { yaml } from '@codemirror/lang-yaml'
-import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language'
-import { properties } from '@codemirror/legacy-modes/mode/properties'
-import { shell } from '@codemirror/legacy-modes/mode/shell'
-import { toml } from '@codemirror/legacy-modes/mode/toml'
-import type { Extension } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
-import { tags } from '@lezer/highlight'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Ban, CheckCircle2, CircleX, Copy, Info, KeyRound, LogOut, Play, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shield, ShieldOff, Square, Trash2, TriangleAlert, Upload, Users, UserX, X, Zap } from 'lucide-react'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -19,6 +8,11 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { consoleLineTokens } from '@/lib/console'
 import type { FileEntry, PaperBuild, PlayerAction, PlayerView, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
+
+import { Dialog } from 'radix-ui'
+import { mergeLogHistory, type LogHistory } from './lib/log-history'
+import { copyText } from './lib/clipboard'
+const FileEditor = lazy(() => import('./FileEditor'))
 
 class ApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
@@ -31,6 +25,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
     headers: init?.body && !multipart ? { 'Content-Type': 'application/json', ...init.headers } : init?.headers,
   })
   const body = await response.json().catch(() => ({}))
+  if (response.status === 401 && path !== '/api/auth/login') window.dispatchEvent(new Event('minedeck-session-expired'))
   if (!response.ok) throw new ApiError(body.error ?? `Request failed (${response.status})`, response.status)
   return body as T
 }
@@ -217,14 +212,23 @@ function Login({ onLogin, theme, onThemeChange }: { onLogin: () => void; theme: 
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  return <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 p-0 backdrop-blur-sm sm:items-center sm:p-5" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-    <div role="dialog" aria-modal="true" aria-label={title} className="max-h-[94vh] w-full max-w-2xl overflow-auto rounded-t-xl border border-border bg-popover text-popover-foreground shadow-md sm:rounded-xl">
+  const previousFocus = useRef<HTMLElement | null>(document.activeElement as HTMLElement)
+  return <Dialog.Root open onOpenChange={(open) => { if (!open) onClose() }}><Dialog.Portal>
+    <Dialog.Overlay className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm" />
+    <Dialog.Content aria-describedby={undefined} onCloseAutoFocus={(event) => { event.preventDefault(); previousFocus.current?.focus() }} className="fixed bottom-0 left-1/2 z-50 max-h-[94vh] w-full max-w-2xl -translate-x-1/2 overflow-auto rounded-t-xl border border-border bg-popover text-popover-foreground shadow-md sm:bottom-auto sm:top-1/2 sm:-translate-y-1/2 sm:rounded-xl">
       <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border bg-popover/95 px-5 py-4 backdrop-blur">
-        <h2 className="font-bold text-popover-foreground">{title}</h2><Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close"><X /></Button>
-      </div>
-      {children}
-    </div>
-  </div>
+        <Dialog.Title className="font-bold text-popover-foreground">{title}</Dialog.Title><Button variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close"><X /></Button>
+      </div>{children}
+    </Dialog.Content>
+  </Dialog.Portal></Dialog.Root>
+}
+
+function CopyButton({ text, label }: { text: string | null | undefined; label: string }) {
+  const [copied, setCopied] = useState(false)
+  const [manual, setManual] = useState(false)
+  return <><Button variant="outline" size="sm" disabled={!text} onClick={async () => { if (!text) return; const success = await copyText(text); setCopied(success); setManual(!success) }}><Copy />{copied ? 'Copied' : label}</Button>
+    {copied && <span className="sr-only" role="status">Copied to clipboard</span>}
+    {manual && <Modal title={label} onClose={() => setManual(false)}><div className="space-y-3 p-5"><p>Automatic copying is unavailable. Select this text and use your device's Copy command.</p><textarea aria-label="Text to copy" className="field h-48" readOnly value={text ?? ''} onFocus={(event) => event.currentTarget.select()} /><Button onClick={() => setManual(false)}>Done</Button></div></Modal>}</>
 }
 
 function ConfirmationModal({ title, message, confirmLabel, busyLabel, busy, onConfirm, onClose }: {
@@ -375,10 +379,11 @@ function Console({ server, address, lines, samples, onCommand }: { server: Serve
   const [history, setHistory] = useState<string[]>([])
   const [historyIndex, setHistoryIndex] = useState<number | null>(null)
   const [historyDraft, setHistoryDraft] = useState('')
-  const end = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    end.current?.scrollIntoView({ block: 'end' })
-  }, [lines.length])
+  const scroll = useRef<HTMLDivElement>(null)
+  const following = useRef(true)
+  const [paused, setPaused] = useState(false)
+  const jumpToLatest = () => { following.current = true; setPaused(false); if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight }
+  useEffect(() => { if (following.current) jumpToLatest() }, [lines])
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (!command.trim()) return
     const value = command; setCommand(''); setError(''); setHistory((items) => [...items, value].slice(-100)); setHistoryIndex(null); setHistoryDraft('')
@@ -392,15 +397,16 @@ function Console({ server, address, lines, samples, onCommand }: { server: Serve
   return <div className="space-y-4">
     <div className="panel flex items-center justify-between gap-4 px-4 py-3">
       <div className="min-w-0"><div className="text-[11px] font-bold uppercase tracking-wider text-muted-foreground">Server address</div><code className="mt-1 block truncate text-sm font-semibold text-foreground">{address === undefined ? 'Loading…' : address ?? 'Unavailable'}</code></div>
-      <Button variant="outline" size="sm" disabled={!address} onClick={() => address && void navigator.clipboard.writeText(address)}><Copy />Copy address</Button>
+      <CopyButton text={address} label="Copy address" />
     </div>
     <section className="panel overflow-hidden">
-      <div className="flex items-center justify-between border-b border-border px-4 py-3"><span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><span className={`h-2 w-2 rounded-full ${running ? 'bg-chart-2 shadow-[0_0_8px_#50fa7b]' : 'bg-muted-foreground'}`} />Live console</span><Button variant="ghost" size="xs" onClick={() => navigator.clipboard.writeText(lines.join('\n'))}>Copy output</Button></div>
-      <div className="console-lines h-[48vh] min-h-80 overflow-auto bg-sidebar py-3 font-mono text-[12px] leading-5 text-foreground sm:text-[13px]">
+      <div className="flex items-center justify-between border-b border-border px-4 py-3"><span className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-muted-foreground"><span className={`h-2 w-2 rounded-full ${running ? 'bg-chart-2 shadow-[0_0_8px_#50fa7b]' : 'bg-muted-foreground'}`} />Live console</span><CopyButton text={lines.join('\n')} label="Copy output" /></div>
+      <div ref={scroll} onScroll={(event) => { const node = event.currentTarget; following.current = node.scrollHeight - node.scrollTop - node.clientHeight < 48; setPaused(!following.current) }} className="console-lines h-[48vh] min-h-80 overflow-auto bg-sidebar py-3 font-mono text-[12px] leading-5 text-foreground sm:text-[13px]">
         {!lines.length && <div className="px-3 text-muted-foreground">Console output will appear here.</div>}
         {lines.map((line, index) => <div key={`${index}-${line}`} className="whitespace-pre-wrap break-all px-3 hover:bg-white/[.025]">{consoleLineTokens(line).map((token, tokenIndex) => <span key={tokenIndex} className={token.className}>{token.text}</span>)}</div>)}
-        <div ref={end} />
+
       </div>
+      {paused && <Button variant="outline" className="m-3" onClick={jumpToLatest}>Jump to latest</Button>}
       <form onSubmit={submit} className="border-t border-border bg-card p-3">
         <div className="flex gap-2"><span className="flex items-center font-mono font-bold text-primary">›</span><Input className="h-10 flex-1 font-mono" aria-label="Console command" placeholder={running ? 'Enter a Minecraft command…' : 'Start the server to send commands'} disabled={!running} value={command} onChange={(event) => setCommand(event.target.value)} onKeyDown={(event) => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); navigateHistory(event.key === 'ArrowUp' ? 'up' : 'down') } }} /><Button size="lg" disabled={!running}><Send />Send</Button></div>
         {error && <p className="mt-2 text-xs text-destructive">{error}</p>}
@@ -461,52 +467,6 @@ function ResourceChart({ title, value, detail = 'Java process', samples, getValu
   </section>
 }
 
-const editorTheme = EditorView.theme({
-  '&': { height: '100%', backgroundColor: 'var(--sidebar)', color: 'var(--foreground)', fontSize: '13px' },
-  '&.cm-focused': { outline: 'none' },
-  '.cm-scroller': { fontFamily: '"Fira Code Variable", "Fira Code", monospace', lineHeight: '1.65', overflow: 'auto' },
-  '.cm-content': { padding: '14px 0', caretColor: 'var(--primary)' },
-  '.cm-line': { padding: '0 18px' },
-  '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--primary)' },
-  '.cm-gutters': { backgroundColor: 'var(--background)', color: 'var(--muted-foreground)', border: 'none', borderRight: '1px solid var(--border)' },
-  '.cm-lineNumbers .cm-gutterElement': { padding: '0 12px 0 10px', minWidth: '44px' },
-  '.cm-activeLine': { backgroundColor: 'color-mix(in srgb, var(--foreground), transparent 96%)' },
-  '.cm-activeLineGutter': { backgroundColor: 'color-mix(in srgb, var(--primary), transparent 88%)', color: 'var(--primary)' },
-  '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': { backgroundColor: 'color-mix(in srgb, var(--primary), transparent 75%)' },
-  '.cm-foldGutter .cm-gutterElement': { color: 'var(--muted-foreground)' },
-  '.cm-searchMatch': { backgroundColor: 'color-mix(in srgb, var(--chart-3), transparent 70%)', outline: '1px solid var(--chart-3)' },
-  '.cm-panels': { backgroundColor: 'var(--card)', color: 'var(--card-foreground)' },
-}, { dark: true })
-
-const editorHighlighting = syntaxHighlighting(HighlightStyle.define([
-  { tag: tags.comment, color: 'var(--muted-foreground)', fontStyle: 'italic' },
-  { tag: [tags.propertyName, tags.attributeName, tags.tagName], color: 'var(--chart-5)' },
-  { tag: [tags.string, tags.attributeValue], color: 'var(--chart-2)' },
-  { tag: [tags.number, tags.bool, tags.null, tags.atom], color: 'var(--chart-3)' },
-  { tag: [tags.keyword, tags.modifier, tags.typeName], color: 'var(--chart-4)' },
-  { tag: [tags.operator, tags.punctuation, tags.bracket], color: 'var(--chart-1)' },
-  { tag: [tags.variableName, tags.name], color: 'var(--foreground)' },
-  { tag: tags.invalid, color: 'var(--destructive)', textDecoration: 'underline' },
-]))
-
-interface EditorLanguage { label: string; extension?: Extension }
-
-const editorLanguages: Record<string, EditorLanguage> = {
-  yml: { label: 'YAML', extension: yaml() },
-  yaml: { label: 'YAML', extension: yaml() },
-  json: { label: 'JSON', extension: json() },
-  mcmeta: { label: 'JSON', extension: json() },
-  xml: { label: 'XML', extension: xml() },
-  properties: { label: 'Properties', extension: StreamLanguage.define(properties) },
-  conf: { label: 'Config', extension: StreamLanguage.define(properties) },
-  cfg: { label: 'Config', extension: StreamLanguage.define(properties) },
-  ini: { label: 'INI', extension: StreamLanguage.define(properties) },
-  toml: { label: 'TOML', extension: StreamLanguage.define(toml) },
-  sh: { label: 'Shell', extension: StreamLanguage.define(shell) },
-  command: { label: 'Shell', extension: StreamLanguage.define(shell) },
-}
-
-const languageFor = (name: string): EditorLanguage => editorLanguages[name.split('.').pop()?.toLowerCase() ?? ''] ?? { label: 'Plain text' }
 const fileTone = (name: string) => {
   const extension = name.split('.').pop()?.toLowerCase()
   if (extension === 'yml' || extension === 'yaml') return 'border-chart-1/30 bg-chart-1/10 text-chart-1'
@@ -522,12 +482,15 @@ function FileGlyph({ entry }: { entry: FileEntry }) {
   return <span aria-hidden="true" className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg border text-sm ${fileTone(entry.name)}`}>▤</span>
 }
 
-function Files({ server }: { server: ServerView }) {
+function Files({ server, onDirty }: { server: ServerView; onDirty: (dirty: boolean) => void }) {
   const [path, setPath] = useState('')
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [file, setFile] = useState('')
   const [content, setContent] = useState('')
   const [savedContent, setSavedContent] = useState('')
+  const [version, setVersion] = useState<string | null>(null)
+  const [conflict, setConflict] = useState(false)
+  const [discardAction, setDiscardAction] = useState<(() => void) | null>(null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
@@ -538,35 +501,36 @@ function Files({ server }: { server: ServerView }) {
   const saveShortcut = useRef<() => boolean>(() => true)
   const platform = useMemo(browserPlatform, [])
   const dirty = content !== savedContent
-  const language = languageFor(file)
-  const saveKeymap = useMemo(() => keymap.of([{ key: 'Mod-s', preventDefault: true, run: () => saveShortcut.current() }]), [])
-  const editorExtensions = useMemo(() => [editorTheme, editorHighlighting, saveKeymap, ...(language.extension ? [language.extension] : [])], [language.extension, saveKeymap])
+  useEffect(() => { onDirty(dirty); return () => onDirty(false) }, [dirty, onDirty])
+  const languageLabel = ({yml:'YAML',yaml:'YAML',json:'JSON',mcmeta:'JSON',xml:'XML',properties:'Properties',conf:'Config',cfg:'Config',ini:'INI',toml:'TOML',sh:'Shell',command:'Shell'} as Record<string,string>)[file.split('.').pop()?.toLowerCase() ?? ''] ?? 'Plain text'
 
   const getDirectory = (next: string) => api<{ path: string; entries: FileEntry[] }>(`/api/servers/${server.id}/files?path=${encodeURIComponent(next)}`)
-  const loadDirectory = async (next: string) => {
-    if (dirty && !confirm('Discard unsaved file changes?')) return
+  const loadDirectory = async (next: string, discard = false) => {
+    if (busy) return
+    if (dirty && !discard) { setDiscardAction(() => () => void loadDirectory(next, true)); return }
     setBusy('Browsing…'); setError(''); setNotice(''); setFile('')
     try {
       const result = await getDirectory(next)
       setPath(result.path); setEntries(result.entries); setContent(''); setSavedContent(''); setCursor({ line: 1, column: 1 })
     } catch (reason) { setError((reason as Error).message) } finally { setBusy('') }
   }
-  const loadFile = async (name: string) => {
-    if (dirty && !confirm('Discard unsaved file changes?')) return
+  const loadFile = async (name: string, discard = false) => {
+    if (busy) return
+    if (dirty && !discard) { setDiscardAction(() => () => void loadFile(name, true)); return }
     const target = path ? `${path}/${name}` : name
     setBusy('Opening…'); setError(''); setNotice('')
     try {
-      const result = await api<{ content: string }>(`/api/servers/${server.id}/file?path=${encodeURIComponent(target)}`)
-      setFile(target); setContent(result.content); setSavedContent(result.content); setCursor({ line: 1, column: 1 })
+      const result = await api<{ content: string; version: string }>(`/api/servers/${server.id}/file?path=${encodeURIComponent(target)}`)
+      setVersion(result.version); setConflict(false); setFile(target); setContent(result.content); setSavedContent(result.content); setCursor({ line: 1, column: 1 })
     } catch (reason) { setError((reason as Error).message) } finally { setBusy('') }
   }
   const save = async () => {
     if (!file || !dirty) return
     setBusy('Saving…'); setError(''); setNotice('')
     try {
-      await api(`/api/servers/${server.id}/file`, { method: 'PUT', body: JSON.stringify({ path: file, content }) })
-      setSavedContent(content); setNotice('Changes saved.')
-    } catch (reason) { setError((reason as Error).message) } finally { setBusy('') }
+      const result = await api<{version:string}>(`/api/servers/${server.id}/file`, { method: 'PUT', body: JSON.stringify({ path: file, content, version }) })
+      setVersion(result.version); setConflict(false); setSavedContent(content); setNotice('Changes saved.')
+    } catch (reason) { setError((reason as Error).message); if (reason instanceof ApiError && reason.status === 409) setConflict(true) } finally { setBusy('') }
   }
   saveShortcut.current = () => {
     if (file && dirty && !busy) void save()
@@ -612,8 +576,9 @@ function Files({ server }: { server: ServerView }) {
   const bytes = new TextEncoder().encode(content).byteLength
 
   return <section className="panel overflow-hidden" aria-busy={Boolean(busy)}>
+    {discardAction && <ConfirmationModal title="Discard unsaved file changes?" message="Your draft will be discarded. Continue opening the file or folder?" confirmLabel="Discard changes" busyLabel="Opening…" busy={false} onClose={() => setDiscardAction(null)} onConfirm={() => { setDiscardAction(null); discardAction() }} />}
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-card/70 px-4 py-3">
-      <div className="flex min-w-0 items-center gap-1 text-sm"><button className="font-semibold text-primary hover:text-primary/80" onClick={() => void loadDirectory('')}>root</button>{parts.map((part, index) => <span key={`${part}-${index}`} className="flex min-w-0 items-center gap-1"><span className="text-muted-foreground">/</span><button className="max-w-36 truncate text-foreground/80 hover:text-foreground" onClick={() => void loadDirectory(parts.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
+      <div className="flex min-w-0 items-center gap-1 text-sm"><button disabled={Boolean(busy)} className="font-semibold text-primary hover:text-primary/80" onClick={() => void loadDirectory('')}>root</button>{parts.map((part, index) => <span key={`${part}-${index}`} className="flex min-w-0 items-center gap-1"><span className="text-muted-foreground">/</span><button disabled={Boolean(busy)} className="max-w-36 truncate text-foreground/80 hover:text-foreground" onClick={() => void loadDirectory(parts.slice(0, index + 1).join('/'))}>{part}</button></span>)}</div>
       <div className="flex items-center gap-3">
         <span className="hidden text-xs text-muted-foreground sm:inline">Upload up to 512 MB per file</span>
         <input ref={uploadInput} className="hidden" type="file" multiple onChange={(event) => { void upload(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = '' }} />
@@ -646,26 +611,12 @@ function Files({ server }: { server: ServerView }) {
       <div className="flex min-h-[32rem] min-w-0 flex-col bg-sidebar">
         {file ? <>
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-sidebar px-3 py-2.5 sm:px-4">
-            <div className="flex min-w-0 items-center gap-2"><span className={`grid h-7 w-7 shrink-0 place-items-center rounded-md border text-xs ${fileTone(activeName)}`}>▤</span><span className="min-w-0 truncate font-mono text-xs font-semibold text-foreground/80">{activeName}</span><Badge variant="outline" className="rounded-md text-[10px] uppercase tracking-wider">{language.label}</Badge>{dirty && <span className="text-xs text-chart-3">● Unsaved</span>}</div>
+            <div className="flex min-w-0 items-center gap-2"><span className={`grid h-7 w-7 shrink-0 place-items-center rounded-md border text-xs ${fileTone(activeName)}`}>▤</span><span className="min-w-0 truncate font-mono text-xs font-semibold text-foreground/80">{activeName}</span><Badge variant="outline" className="rounded-md text-[10px] uppercase tracking-wider">{languageLabel}</Badge>{dirty && <span className="text-xs text-chart-3">● Unsaved</span>}</div>
             <div className="flex items-center gap-2"><Button variant="destructive" size="sm" disabled={Boolean(busy)} onClick={() => setPendingDelete({ name: activeName, target: file, type: 'file' })}><Trash2 />Recycle</Button><Button size="sm" disabled={!dirty || Boolean(busy)} onClick={() => void save()} title={`Save (${shortcutLabel('S', platform)})`}><Save />{busy === 'Saving…' ? busy : 'Save'} <span className="hidden font-normal opacity-60 sm:inline">{shortcutLabel('S', platform)}</span></Button></div>
           </div>
+          {conflict && <div role="alert" className="p-3 text-sm">This file changed on disk. Your draft is preserved. <Button variant="outline" size="sm" onClick={() => void loadFile(activeName)}>Reload disk version</Button></div>}
           <div className="file-editor min-h-0 flex-1 overflow-hidden">
-            <CodeMirror
-              aria-label={`Editing ${file}`}
-              value={content}
-              height="100%"
-              theme="none"
-              extensions={editorExtensions}
-              basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, highlightActiveLineGutter: true, bracketMatching: true, closeBrackets: true, autocompletion: false, tabSize: 2 }}
-              indentWithTab
-              onChange={setContent}
-              onUpdate={(update) => {
-                const position = update.state.selection.main.head
-                const line = update.state.doc.lineAt(position)
-                const next = { line: line.number, column: position - line.from + 1 }
-                setCursor((current) => current.line === next.line && current.column === next.column ? current : next)
-              }}
-            />
+            <Suspense fallback={<p className="p-4 text-muted-foreground">Loading editor…</p>}><FileEditor file={file} content={content} onChange={setContent} onSave={() => saveShortcut.current()} onCursor={(next) => setCursor((current) => current.line === next.line && current.column === next.column ? current : next)} /></Suspense>
           </div>
           <div className="flex items-center justify-between gap-3 border-t border-border bg-sidebar px-4 py-1.5 font-mono text-[10px] text-muted-foreground"><span>Ln {cursor.line}, Col {cursor.column}</span><span className="hidden lg:inline">{shortcutLabel('S', platform)} save · {shortcutLabel('F', platform)} find · {shortcutLabel('Z', platform)} undo</span><span>{lineCount} {lineCount === 1 ? 'line' : 'lines'} · {formatSize(bytes)} · UTF-8</span></div>
         </> : <div className="flex flex-1 items-center justify-center p-10 text-center"><div><div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl border border-border bg-card text-2xl text-muted-foreground">▤</div><p className="mt-4 text-sm font-medium text-foreground/80">Choose a text or config file</p><p className="mt-1 text-xs leading-5 text-muted-foreground">YAML, JSON, properties, TOML, XML, and shell files<br className="hidden sm:block" /> get automatic syntax colours.</p></div></div>}
@@ -767,7 +718,7 @@ function Players({ server }: { server: ServerView }) {
 
     {selected && <Modal title={`Manage ${selected.username}`} onClose={() => { setSelectedUuid(''); setError(''); setNotice('') }}>
       <div className="p-5 sm:p-6">
-        <div className="flex items-center gap-4"><img src={playerHeadUrl(selected.uuid)} alt={`${selected.username}'s Minecraft head`} width="80" height="80" className="h-20 w-20 rounded-xl bg-muted [image-rendering:pixelated]" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate text-xl font-black text-popover-foreground">{selected.username}</h3><Badge variant="outline" className="gap-1.5"><span className={`h-1.5 w-1.5 rounded-full ${selected.isOnline ? 'bg-chart-2' : 'bg-muted-foreground'}`} />{selected.isOnline ? 'Online' : 'Offline'}</Badge></div><div className="mt-2 flex min-w-0 items-center gap-1.5"><code className="truncate text-xs text-muted-foreground">{selected.uuid}</code><Button variant="ghost" size="icon-xs" onClick={() => void navigator.clipboard.writeText(selected.uuid)} aria-label="Copy UUID"><Copy /></Button></div></div></div>
+        <div className="flex items-center gap-4"><img src={playerHeadUrl(selected.uuid)} alt={`${selected.username}'s Minecraft head`} width="80" height="80" className="h-20 w-20 rounded-xl bg-muted [image-rendering:pixelated]" /><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h3 className="truncate text-xl font-black text-popover-foreground">{selected.username}</h3><Badge variant="outline" className="gap-1.5"><span className={`h-1.5 w-1.5 rounded-full ${selected.isOnline ? 'bg-chart-2' : 'bg-muted-foreground'}`} />{selected.isOnline ? 'Online' : 'Offline'}</Badge></div><div className="mt-2 flex min-w-0 items-center gap-1.5"><code className="truncate text-xs text-muted-foreground">{selected.uuid}</code><CopyButton text={selected.uuid} label="Copy UUID" /></div></div></div>
 
         <div className="mt-6 flex flex-wrap gap-2">{selected.isOp && <Badge variant="outline" className="border-primary/30 text-primary">Operator</Badge>}{selected.isWhitelisted && <Badge variant="outline">Whitelisted</Badge>}{selected.isBanned && <Badge variant="destructive">Banned</Badge>}{!selected.isOp && !selected.isWhitelisted && !selected.isBanned && <span className="text-xs text-muted-foreground">No special access</span>}</div>
         {notice && <Alert className="mt-5 border-chart-2/30 bg-chart-2/10 text-chart-2"><AlertDescription>{notice}</AlertDescription></Alert>}
@@ -819,10 +770,20 @@ function ThemeFooter({ selected, onChange, offset = false }: { selected: AppThem
 
 function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; theme: AppTheme; onThemeChange: (theme: AppTheme) => void }) {
   const [servers, setServers] = useState<ServerView[]>([])
+  const [leaveAction, setLeaveAction] = useState<(() => void) | null>(null)
+  const fileDirty = useRef(false)
+  const allowLeave = useRef(false)
+  const onFileDirty = useCallback((dirty: boolean) => { fileDirty.current = dirty }, [])
+  const canLeave = (action: () => void) => {
+    if (allowLeave.current || !fileDirty.current) return true
+    setLeaveAction(() => action)
+    return false
+  }
   const [serversLoaded, setServersLoaded] = useState(false)
   const [selectedId, setSelectedId] = useState(serverIdFromPath)
   const [tab, setTab] = useState<(typeof tabs)[number]>('console')
-  const [logs, setLogs] = useState<Record<string, string[]>>({})
+  const [logs, setLogs] = useState<Record<string, LogHistory>>({})
+  const [connection, setConnection] = useState(0)
   const [metricHistory, setMetricHistory] = useState<MetricHistory>({})
   const [connected, setConnected] = useState(false)
   const [serverAddresses, setServerAddresses] = useState<Record<string, string | null>>({})
@@ -836,6 +797,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
   const restarting = useRef(new Set<string>())
   const nextToastId = useRef(0)
   const selected = servers.find((server) => server.id === selectedId)
+  const selectedLines = useMemo(() => logs[selectedId]?.entries.map((entry) => entry.line) ?? [], [logs, selectedId])
   const notify = (content: ToastContent, group?: string) => {
     const id = ++nextToastId.current
     setToasts((items) => [...items.filter((item) => !group || item.group !== group), { ...content, id, group }].slice(-4))
@@ -863,24 +825,35 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
   }, [selectedId, tab])
   useEffect(() => {
     const navigateFromHistory = () => {
+      const destination = serverIdFromPath()
+      if (!canLeave(() => select(destination))) { window.history.pushState(null, '', selectedId ? `/servers/${encodeURIComponent(selectedId)}` : '/'); return }
       setSelectedId(serverIdFromPath())
       setTab('console')
       setError('')
     }
     window.addEventListener('popstate', navigateFromHistory)
     return () => window.removeEventListener('popstate', navigateFromHistory)
+  }, [selectedId])
+  useEffect(() => {
+    const beforeUnload = (event: BeforeUnloadEvent) => { if (fileDirty.current) { event.preventDefault(); event.returnValue = '' } }
+    window.addEventListener('beforeunload', beforeUnload)
+    return () => window.removeEventListener('beforeunload', beforeUnload)
   }, [])
   useEffect(() => {
-    if (!selectedId || logs[selectedId]) return
-    void api<{ lines: string[] }>(`/api/servers/${selectedId}/console`).then(({ lines }) => setLogs((current) => ({ ...current, [selectedId]: lines }))).catch(() => undefined)
-  }, [selectedId, logs])
+    if (!selectedId || !connection) return
+    let active = true
+    void api<LogHistory>(`/api/servers/${selectedId}/console`).then((snapshot) => {
+      if (active) setLogs((current) => ({ ...current, [selectedId]: mergeLogHistory(current[selectedId], snapshot) }))
+    }).catch((reason) => { if (active) setError(`Could not load console history: ${reason.message}`) })
+    return () => { active = false }
+  }, [selectedId, connection])
   useEffect(() => {
     let socket: WebSocket | undefined
     let retry: number | undefined
     let active = true
     const connect = () => {
       socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
-      socket.onopen = () => setConnected(true)
+      socket.onopen = () => { setConnected(true); setConnection((value) => value + 1) }
       socket.onmessage = ({ data }) => {
         const event = JSON.parse(data) as SocketEvent
         if (event.type === 'servers') {
@@ -895,9 +868,17 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
           statuses.current = new Map(event.servers.map((server) => [server.id, server.status]))
           setServers(event.servers)
           setMetricHistory((current) => appendMetricHistory(current, event.servers))
-        } else setLogs((current) => ({ ...current, [event.serverId]: [...(current[event.serverId] ?? []), event.line].slice(-800) }))
+        } else setLogs((current) => ({ ...current, [event.serverId]: mergeLogHistory(current[event.serverId], {epoch:event.epoch,entries:[{sequence:event.sequence,line:event.line}]}) }))
       }
-      socket.onclose = () => { setConnected(false); if (active) retry = window.setTimeout(connect, 2_000) }
+      socket.onclose = () => {
+        if (!active) return
+        setConnected(false)
+        void api<{authenticated:boolean}>('/api/auth/session').then(({authenticated}) => {
+          if (!active) return
+          if (!authenticated) { window.dispatchEvent(new Event('minedeck-session-expired')); return }
+          retry = window.setTimeout(connect, 2_000)
+        }).catch((reason) => { if (active && !(reason instanceof ApiError && reason.status === 401)) retry = window.setTimeout(connect, 2_000) })
+      }
     }
     connect()
     return () => { active = false; if (retry) clearTimeout(retry); socket?.close() }
@@ -915,8 +896,9 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
       notify({ tone: 'error', title: 'Action failed', message }, `server:${selected.id}`)
     }
   }
-  const logout = async () => { await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined); onLogout() }
+  const logout = async () => { if (!canLeave(() => void logout())) return; await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined); onLogout() }
   const remove = async (server: ServerView) => {
+    if (server.id === selectedId && !canLeave(() => void remove(server))) return
     setRemovingId(server.id)
     setError('')
     try {
@@ -933,7 +915,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
       })
       statuses.current.delete(server.id)
       restarting.current.delete(server.id)
-      if (selectedId === server.id) select('')
+      if (selectedId === server.id) { fileDirty.current = false; select('') }
       notify({ tone: 'success', title: 'Server removed', message: `${server.name} was removed from MineDeck. Its files were left untouched.` })
     } catch (reason) {
       const message = (reason as Error).message
@@ -942,6 +924,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
     } finally { setRemovingId(''); setPendingRemoval(undefined) }
   }
   const select = (id: string) => {
+    if (!canLeave(() => select(id))) return
     window.history.pushState(null, '', id ? `/servers/${encodeURIComponent(id)}` : '/')
     setSelectedId(id)
     setTab('console')
@@ -949,6 +932,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
   }
 
   return <div className="flex min-h-screen flex-col bg-background text-foreground">
+    {leaveAction && <ConfirmationModal title="Discard unsaved file changes?" message="Your file has unsaved changes. Discard them and continue?" confirmLabel="Discard changes" busyLabel="Leaving…" busy={false} onClose={() => setLeaveAction(null)} onConfirm={() => { setLeaveAction(null); allowLeave.current = true; try { leaveAction() } finally { allowLeave.current = false } }} />}
     <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
     {selected && <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground lg:flex">
       <div className="border-b border-sidebar-border p-5"><Logo /></div>
@@ -957,7 +941,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
       </div>
       <nav className="flex-1 p-3">
         <div className="flex items-center justify-between px-3 pb-2 pt-1"><span className="text-[11px] font-bold uppercase tracking-[.18em] text-muted-foreground">Server</span><span className={`flex items-center gap-1.5 text-[11px] ${connected ? 'text-muted-foreground' : 'text-chart-3'}`}><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-chart-2' : 'bg-chart-3'}`} />{connected ? 'Live' : 'Reconnecting'}</span></div>
-        {tabs.map((item) => <button key={item} onClick={() => setTab(item)} className={`mb-1 flex w-full items-center rounded-lg border px-4 py-3 text-left text-sm font-semibold capitalize transition ${tab === item ? 'border-sidebar-border bg-sidebar-accent text-sidebar-accent-foreground' : 'border-transparent text-muted-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}>{item}</button>)}
+        {tabs.map((item) => <button key={item} onClick={() => { if (tab === item || canLeave(() => setTab(item))) setTab(item) }} className={`mb-1 flex w-full items-center rounded-lg border px-4 py-3 text-left text-sm font-semibold capitalize transition ${tab === item ? 'border-sidebar-border bg-sidebar-accent text-sidebar-accent-foreground' : 'border-transparent text-muted-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-foreground'}`}>{item}</button>)}
       </nav>
       <div className="space-y-2 border-t border-sidebar-border p-3"><Button className="w-full" size="lg" onClick={() => setAddOpen(true)}><Plus />Add server</Button><div className="grid grid-cols-2 gap-2"><Button variant="ghost" size="sm" onClick={() => setPasswordOpen(true)}><KeyRound />Password</Button><Button variant="ghost" size="sm" onClick={() => void logout()}><LogOut />Sign out</Button></div></div>
     </aside>}
@@ -966,6 +950,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
       <div className="flex items-center gap-3"><Logo compact /><select aria-label="Select server" className="field min-w-0 flex-1 py-2" value={selectedId} onChange={(event) => select(event.target.value)}><option value="">Select a server</option>{servers.map((server) => <option key={server.id} value={server.id}>{server.name} · {prettyStatus(server.status)}</option>)}</select><Button size="icon-lg" onClick={() => setAddOpen(true)} aria-label="Add server"><Plus /></Button><Button variant="outline" size="icon-lg" onClick={() => setPasswordOpen(true)} aria-label="Account settings"><Settings /></Button></div>
     </header>
 
+    {!selected && <div className="hidden items-center justify-between border-b border-border p-4 lg:flex"><Logo /><div className="flex gap-2"><Button variant="outline" onClick={() => setPasswordOpen(true)}><KeyRound />Password</Button><Button variant="ghost" onClick={() => void logout()}><LogOut />Sign out</Button></div></div>}
     <main className={`flex-1 ${selected ? 'lg:ml-72' : ''}`}>
       {!serversLoaded ? <div className="flex min-h-[70vh] items-center justify-center"><div className="brand-cube h-10 w-10 animate-pulse rounded-xl" /></div> : selected ? <div className="mx-auto max-w-7xl p-4 sm:p-6 lg:p-8">
         <div className="mb-6 flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
@@ -983,12 +968,12 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
           <Metric label="Crashes" value={String(selected.crashCount)} detail={selected.lastCrashAt ? new Date(selected.lastCrashAt).toLocaleDateString() : 'None recorded'} className="col-span-2 md:col-span-1" />
         </div>
         <div className="mb-4 flex items-center justify-between border-b border-border lg:hidden">
-          <div className="flex overflow-auto">{tabs.map((item) => <button key={item} className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize transition ${tab === item ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => setTab(item)}>{item}</button>)}</div>
+          <div className="flex overflow-auto">{tabs.map((item) => <button key={item} className={`border-b-2 px-4 py-3 text-sm font-semibold capitalize transition ${tab === item ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'}`} onClick={() => { if (tab === item || canLeave(() => setTab(item))) setTab(item) }}>{item}</button>)}</div>
           <span className={`hidden items-center gap-1.5 text-xs sm:flex ${connected ? 'text-muted-foreground' : 'text-chart-3'}`}><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-chart-2' : 'bg-chart-3'}`} />{connected ? 'Live' : 'Reconnecting'}</span>
         </div>
-        {tab === 'console' && <Console key={selected.id} server={selected} address={serverAddresses[selected.id]} lines={logs[selected.id] ?? []} samples={metricHistory[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
+        {tab === 'console' && <Console key={selected.id} server={selected} address={serverAddresses[selected.id]} lines={selectedLines} samples={metricHistory[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
         {tab === 'players' && <Players server={selected} />}
-        {tab === 'files' && <Files server={selected} />}
+        {tab === 'files' && <Files key={selected.id} server={selected} onDirty={onFileDirty} />}
         {tab === 'configuration' && <Card className="gap-0 overflow-hidden py-0"><div className="border-b border-border px-5 py-4"><h2 className="font-bold text-card-foreground">Server configuration</h2><p className="mt-1 text-xs text-muted-foreground">Stop the server before changing launch settings.</p></div><ServerForm server={selected} onSaved={(saved) => setServers((items) => items.map((item) => item.id === saved.id ? saved : item))} onDelete={() => setPendingRemoval(selected)} /></Card>}
       </div> : servers.length ? <div className="mx-auto max-w-5xl p-6 sm:p-10 lg:p-14"><div className="flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl font-black tracking-tight text-foreground">Select a server</h1><p className="mt-2 text-sm text-muted-foreground">Choose a server before opening its console, files, or configuration.</p></div><Button onClick={() => setAddOpen(true)}><Plus />Add server</Button></div>{error && <Alert variant="destructive" className="mt-5"><AlertDescription>{error}</AlertDescription></Alert>}<div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{servers.map((server) => {
         return <div key={server.id} className="panel group flex items-center transition hover:border-primary/50 hover:bg-muted/50">
@@ -1031,7 +1016,12 @@ export default function App() {
     const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
     themeColor?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--background').trim())
   }, [theme])
-  useEffect(() => { void api<{ authenticated: boolean }>('/api/auth/session').then(({ authenticated }) => setAuthenticated(authenticated)).catch(() => setAuthenticated(false)) }, [])
+  useEffect(() => {
+    const expired = () => setAuthenticated(false)
+    window.addEventListener('minedeck-session-expired', expired)
+    void api<{ authenticated: boolean }>('/api/auth/session').then(({ authenticated }) => setAuthenticated(authenticated)).catch(expired)
+    return () => window.removeEventListener('minedeck-session-expired', expired)
+  }, [])
   if (authenticated === null) return <div className="flex min-h-screen flex-col bg-background"><div className="flex flex-1 items-center justify-center"><div className="brand-cube h-10 w-10 animate-pulse rounded-xl" /></div><ThemeFooter selected={theme} onChange={setTheme} /></div>
   return authenticated
     ? <Dashboard onLogout={() => setAuthenticated(false)} theme={theme} onThemeChange={setTheme} />

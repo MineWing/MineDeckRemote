@@ -53,6 +53,11 @@ export interface PaperBuild {
 
 export type PlayerAction = 'op' | 'deop' | 'remove-whitelist' | 'kick' | 'ban'
 
+export interface ConsoleLine {
+  sequence: number
+  line: string
+}
+
 export type SocketEvent =
   | { type: 'servers'; servers: ServerView[] }
-  | { type: 'console'; serverId: string; line: string }
+  | { type: 'console'; serverId: string; line: string; sequence: number; epoch: string }

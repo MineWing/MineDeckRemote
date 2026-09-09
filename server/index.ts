@@ -2,8 +2,8 @@ import Fastify from 'fastify'
 import fastifyStatic from '@fastify/static'
 import fastifyMultipart from '@fastify/multipart'
 import { spawn, type ChildProcess } from 'node:child_process'
-import { constants, createWriteStream } from 'node:fs'
-import { link, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
+import { link, lstat, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { networkInterfaces } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
@@ -14,6 +14,8 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { FileEntry, SocketEvent } from '../shared.ts'
 import { importServerConfig, InputError, resolveInside, resolveRecyclableEntry, validateServerConfig, validateUploadName } from './core.ts'
 import { ServerManager, type StoredData } from './manager.ts'
+import { Sessions, sessionToken, validOrigin } from './security.ts'
+import { createSaveQueue, readEditableFile, saveEditableFile } from './storage.ts'
 import { downloadPaperJar, listPaperBuilds, listPaperVersions } from './paper.ts'
 
 const scryptAsync = promisify(scrypt)
@@ -38,15 +40,14 @@ try {
   data = { version: 1, servers: [], stats: {} }
 }
 
-let saveQueue = Promise.resolve()
+const enqueueSave = createSaveQueue()
 const save = () => {
   const snapshot = JSON.stringify(data, null, 2)
-  saveQueue = saveQueue.then(async () => {
+  return enqueueSave(async () => {
     const temporary = `${DATA_PATH}.tmp`
     await writeFile(temporary, snapshot, { mode: 0o600 })
     await rename(temporary, DATA_PATH)
   })
-  return saveQueue
 }
 
 const hashPassword = async (password: string, salt = randomBytes(16).toString('hex')) => ({
@@ -79,38 +80,28 @@ await app.register(fastifyMultipart, {
   throwFileSizeLimit: true,
 })
 const wss = new WebSocketServer({ noServer: true })
-const sessions = new Map<string, number>()
+const sessions = new Sessions(SESSION_HOURS * 60 * 60 * 1_000)
+const clientSessions = new WeakMap<WebSocket, string>()
+const sessionSweep = setInterval(() => sessions.expire(), 1_000)
+sessionSweep.unref()
 const loginAttempts = new Map<string, { failures: number; blockedUntil: number }>()
 let closing = false
 let mdnsProcess: ChildProcess | undefined
 
-const cookies = (header = '') => Object.fromEntries(header.split(';').map((part) => {
-  const [key, ...value] = part.trim().split('=')
-  return [key, decodeURIComponent(value.join('='))]
-}).filter(([key]) => key))
-
-const validSession = (header?: string) => {
-  const token = cookies(header).md_session
-  const expires = token ? sessions.get(token) : undefined
-  if (!token || !expires || expires < Date.now()) {
-    if (token) sessions.delete(token)
-    return false
-  }
-  return true
-}
+const validSession = (header?: string) => sessions.valid(sessionToken(header))
 
 const sessionCookie = (token: string, maxAge = SESSION_HOURS * 60 * 60) =>
   `md_session=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}${tls ? '; Secure' : ''}`
 
-const newSession = () => {
-  const token = randomBytes(32).toString('base64url')
-  sessions.set(token, Date.now() + SESSION_HOURS * 60 * 60 * 1_000)
-  return token
-}
+const newSession = () => sessions.create()
 
 const publish = (event: SocketEvent) => {
   const message = JSON.stringify(event)
-  for (const client of wss.clients) if (client.readyState === WebSocket.OPEN) client.send(message)
+  for (const client of wss.clients) {
+    if (sessions.valid(clientSessions.get(client)) && client.readyState === WebSocket.OPEN) {
+      client.send(message, (error) => { if (error) client.terminate() })
+    }
+  }
 }
 const manager = new ServerManager(data, save, publish)
 
@@ -125,7 +116,7 @@ app.addHook('onRequest', async (request, reply) => {
   if (!request.url.startsWith('/api/')) return
   if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method)) {
     const origin = request.headers.origin
-    if (origin && new URL(origin).host !== request.headers.host) throw new InputError('Invalid request origin', 403)
+    if (!validOrigin(origin, request.headers.host, Boolean(tls))) throw new InputError('Invalid request origin', 403)
   }
   const publicRoute = request.url === '/api/auth/session' || request.url === '/api/auth/login'
   if (!publicRoute && !validSession(request.headers.cookie)) return reply.code(401).send({ error: 'Authentication required' })
@@ -153,22 +144,27 @@ app.post('/api/auth/login', async (request, reply) => {
 })
 
 app.post('/api/auth/logout', async (request, reply) => {
-  const token = cookies(request.headers.cookie).md_session
-  if (token) sessions.delete(token)
+  const token = sessionToken(request.headers.cookie)
+  if (token) sessions.revoke(token)
   reply.header('Set-Cookie', sessionCookie('', 0))
   return { ok: true }
 })
 
 app.post('/api/auth/password', async (request, reply) => {
   const body = request.body as { currentPassword?: unknown; newPassword?: unknown }
-  if (!await verifyPassword(body?.currentPassword)) throw new InputError('Current password is incorrect', 401)
+  const verifiedAuth = data.auth
+  if (!await verifyPassword(body?.currentPassword)) throw new InputError('Current password is incorrect', 403)
   if (typeof body.newPassword !== 'string' || body.newPassword.length < 12 || body.newPassword.length > 1_024) {
     throw new InputError('New password must be between 12 and 1024 characters')
   }
-  data.auth = await hashPassword(body.newPassword)
-  await save()
-  sessions.clear()
-  reply.header('Set-Cookie', sessionCookie(newSession()))
+  const replacementAuth = await hashPassword(body.newPassword)
+  await manager.transaction(async () => {
+    if (data.auth !== verifiedAuth) throw new InputError('Password changed during this request; sign in again', 409)
+    data.auth = replacementAuth
+    try { await save() } catch (error) { data.auth = verifiedAuth; throw error }
+    sessions.clear()
+    reply.header('Set-Cookie', sessionCookie(newSession()))
+  })
   return { ok: true }
 })
 
@@ -217,9 +213,9 @@ app.delete('/api/servers/:id', async (request) => {
 app.post('/api/servers/:id/actions/:action', async (request) => {
   const { id, action } = request.params as { id: string; action: string }
   if (action === 'start') return manager.start(id)
-  if (action === 'stop') manager.stop(id)
+  if (action === 'stop') await manager.stop(id)
   else if (action === 'restart') return manager.restart(id)
-  else if (action === 'kill') manager.kill(id)
+  else if (action === 'kill') await manager.kill(id)
   else throw new InputError('Unknown server action', 404)
   return { ok: true }
 })
@@ -229,7 +225,7 @@ app.post('/api/servers/:id/command', async (request) => {
   return { ok: true }
 })
 
-app.get('/api/servers/:id/console', async (request) => ({ lines: manager.getConsole((request.params as { id: string }).id) }))
+app.get('/api/servers/:id/console', async (request) => ({ lines: manager.getConsole((request.params as { id: string }).id), ...manager.getConsoleSnapshot((request.params as { id: string }).id) }))
 
 app.get('/api/servers/:id/players', async (request) => manager.listPlayers((request.params as { id: string }).id))
 
@@ -262,25 +258,19 @@ app.get('/api/servers/:id/file', async (request) => {
   const requested = (request.query as { path?: unknown }).path
   if (typeof requested !== 'string' || !requested) throw new InputError('File path is required')
   const path = await resolveInside(server.directory, requested)
-  const details = await stat(path)
-  if (!details.isFile()) throw new InputError('Path is not a file')
-  if (details.size > MAX_FILE_BYTES) throw new InputError('File is larger than 2 MB', 413)
-  const content = await readFile(path)
-  if (content.includes(0)) throw new InputError('Binary files cannot be edited')
-  return { path: requested, content: content.toString('utf8'), modifiedAt: details.mtime.toISOString() }
+  const { content, details, version } = await readEditableFile(path, MAX_FILE_BYTES)
+  return { path: requested, content: content.toString('utf8'), modifiedAt: details.mtime.toISOString(), version }
 })
 
 app.put('/api/servers/:id/file', async (request) => {
   const server = manager.get((request.params as { id: string }).id)
-  const body = request.body as { path?: unknown; content?: unknown }
-  if (typeof body.path !== 'string' || !body.path || typeof body.content !== 'string') throw new InputError('Path and text content are required')
+  const body = request.body as { path?: unknown; content?: unknown; version?: unknown } | null
+  if (typeof body?.path !== 'string' || !body.path || typeof body.content !== 'string') throw new InputError('Path and text content are required')
+  if (body.version !== null && typeof body.version !== 'string') throw new InputError('File version is required')
   if (Buffer.byteLength(body.content) > MAX_FILE_BYTES) throw new InputError('File is larger than 2 MB', 413)
   const path = await resolveInside(server.directory, body.path, true)
-  const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o600).catch(() => {
-    throw new InputError('File could not be opened safely')
-  })
-  try { await handle.writeFile(body.content, 'utf8') } finally { await handle.close() }
-  return { ok: true }
+  const version = await saveEditableFile(path, body.content, body.version, MAX_FILE_BYTES)
+  return { ok: true, version }
 })
 
 app.post('/api/servers/:id/files/upload', async (request) => {
@@ -348,15 +338,25 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 app.server.on('upgrade', (request, socket, head) => {
-  if (closing || request.url !== '/ws' || !validSession(request.headers.cookie)) {
-    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
-    socket.destroy()
+  socket.on('error', (error) => { app.log.debug(error, 'WebSocket transport error'); socket.destroy() })
+  const token = sessionToken(request.headers.cookie)
+  if (closing || request.url !== '/ws' || !sessions.valid(token)
+    || !validOrigin(request.headers.origin, request.headers.host, Boolean(tls))) {
+    socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
     return
   }
-  wss.handleUpgrade(request, socket, head, (client) => {
-    wss.emit('connection', client, request)
-    client.send(JSON.stringify({ type: 'servers', servers: manager.list() } satisfies SocketEvent))
-  })
+  try {
+    wss.handleUpgrade(request, socket, head, (client) => {
+      client.on('error', (error) => { app.log.debug(error, 'WebSocket protocol error'); client.terminate() })
+      clientSessions.set(client, token)
+      if (!sessions.attach(token, client)) return
+      client.once('close', () => sessions.detach(token, client))
+      wss.emit('connection', client, request)
+      client.send(JSON.stringify({ type: 'servers', servers: manager.list() } satisfies SocketEvent), (error) => {
+        if (error) client.terminate()
+      })
+    })
+  } catch (error) { app.log.debug(error, 'Rejected WebSocket handshake'); socket.destroy() }
 })
 
 const address = await app.listen({ host: HOST, port: PORT })
@@ -407,6 +407,8 @@ if (process.platform === 'darwin' && process.env.MINEDECK_PREVENT_SLEEP === '1')
 const shutdown = async () => {
   if (closing) return
   closing = true
+  clearInterval(sessionSweep)
+  sessions.clear()
   mdnsProcess?.kill('SIGTERM')
   app.log.info('Stopping managed servers…')
   await manager.shutdown()

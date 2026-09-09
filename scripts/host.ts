@@ -3,7 +3,8 @@ import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-const HOST_STOP_TIMEOUT_MS = 15_000
+// Server stop budgets allow 120 seconds; leave time for exit and host cleanup.
+const HOST_STOP_TIMEOUT_MS = 135_000
 
 let host: ChildProcess | undefined
 let activeCommand: ChildProcess | undefined
@@ -42,10 +43,12 @@ const stopHost = async () => {
   if (!current || current.exitCode !== null || current.signalCode !== null) return
   const exited = once(current, 'exit')
   current.kill('SIGTERM')
+  let deadline: NodeJS.Timeout | undefined
   const graceful = await Promise.race([
     exited.then(() => true),
-    new Promise<false>((done) => setTimeout(() => done(false), HOST_STOP_TIMEOUT_MS)),
+    new Promise<false>((done) => deadline = setTimeout(() => done(false), HOST_STOP_TIMEOUT_MS)),
   ])
+  clearTimeout(deadline)
   if (!graceful && current.exitCode === null && current.signalCode === null) {
     status('graceful shutdown timed out; force-stopping the old host.')
     current.kill('SIGKILL')
