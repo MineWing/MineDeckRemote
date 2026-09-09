@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { copyText } from '../src/lib/clipboard.ts'
-import { mergeLogHistory } from '../src/lib/log-history.ts'
+import { appendLogLine, mergeLogHistory } from '../src/lib/log-history.ts'
 
 test('clipboard reports denial and insecure-context absence for selectable fallback', async () => {
   assert.equal(await copyText('hello', undefined), false)
@@ -60,4 +60,21 @@ test('semantic text remains readable on every bundled dark theme', async () => {
     }
     for (const background of ['primary','destructive','secondary','accent']) assert.ok(contrast(tokens[`${background}-foreground`]!,tokens[background]!) >= 4.5, `${theme} ${background} button`)
   }
+})
+
+test('older host snapshots load and retain repeated console messages', () => {
+  const history = mergeLogHistory(undefined, { lines: ['repeat', 'repeat'] })
+  assert.deepEqual(history.entries.map(entry => entry.line), ['repeat', 'repeat'])
+  assert.deepEqual(mergeLogHistory(history, { lines: [] }).entries, [])
+})
+
+test('older host live messages append before and after a snapshot', () => {
+  const first = appendLogLine(undefined, { line: 'repeat' })
+  const second = appendLogLine(first, { line: 'repeat' })
+  assert.deepEqual(second.entries.map(entry => entry.line), ['repeat', 'repeat'])
+  const snapshot = mergeLogHistory(second, { lines: ['older', 'repeat', 'repeat'] })
+  const next = appendLogLine(snapshot, { line: 'new' })
+  assert.deepEqual(next.entries.map(entry => entry.line), ['older', 'repeat', 'repeat', 'new'])
+  const modern = appendLogLine(next, { epoch: 'new-host', sequence: 1, line: 'modern' })
+  assert.deepEqual(modern.entries, [{ sequence: 1, line: 'modern' }])
 })
