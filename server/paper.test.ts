@@ -4,6 +4,7 @@ import { mkdtemp, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { InputError } from './core.ts'
 import { downloadPaperJar, listPaperBuilds, listPaperVersions } from './paper.ts'
 
 const response = (body: unknown) => new Response(JSON.stringify(body), {
@@ -72,4 +73,28 @@ test('Paper JAR downloads are streamed and checksum verified', async () => {
 
   await downloadPaperJar(directory, 'paper.jar', '1.21.11', 42, fetcher)
   assert.deepEqual(await readFile(join(directory, 'paper.jar')), contents)
+})
+
+test('Paper timeout remains active while the JSON body is stalled', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] })
+  let bodyStarted!: () => void
+  const started = new Promise<void>((resolve) => { bodyStarted = resolve })
+  const fetcher: typeof fetch = async (_url, options) => new Response(new ReadableStream({
+    start(controller) {
+      options!.signal!.addEventListener('abort', () => controller.error(new DOMException('Aborted', 'AbortError')), { once: true })
+      bodyStarted()
+    },
+  }))
+  const pending = listPaperVersions(fetcher)
+  const rejected = assert.rejects(pending, (error: unknown) => error instanceof InputError && error.statusCode === 504 && /timed out/.test(error.message))
+  await started
+  // Let fetch return its headers and the caller start consuming the body.
+  await Promise.resolve()
+  await Promise.resolve()
+  context.mock.timers.tick(15_000)
+  await rejected
+})
+
+test('Paper malformed JSON is reported as an invalid upstream response', async () => {
+  await assert.rejects(listPaperVersions(async () => new Response('{')), /invalid response/)
 })

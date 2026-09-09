@@ -43,7 +43,9 @@ const isPaperUrl = (value: string) => {
   }
 }
 
-const paperFetch = async (url: string, fetcher: Fetcher, timeoutMs: number) => {
+const withPaperResponse = async <T>(
+  url: string, fetcher: Fetcher, timeoutMs: number, consume: (response: Response, signal: AbortSignal) => Promise<T>,
+): Promise<T> => {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -53,24 +55,25 @@ const paperFetch = async (url: string, fetcher: Fetcher, timeoutMs: number) => {
     })
     if (!response.ok) throw new InputError(`Paper download service returned ${response.status}`, 502)
     if (!isPaperUrl(response.url || url)) throw new InputError('Paper download service returned an untrusted URL', 502)
-    return response
+    return await consume(response, controller.signal)
   } catch (error) {
     if (error instanceof InputError) throw error
-    if ((error as Error).name === 'AbortError') throw new InputError('Paper download service timed out', 504)
+    if (controller.signal.aborted || (error as Error).name === 'AbortError') throw new InputError('Paper download service timed out', 504)
     throw new InputError('Paper download service is unavailable', 502)
   } finally {
     clearTimeout(timeout)
   }
 }
 
-const paperJson = async (url: string, fetcher: Fetcher) => {
-  const response = await paperFetch(url, fetcher, 15_000)
-  try {
-    return await response.json() as unknown
-  } catch {
-    throw new InputError('Paper download service returned an invalid response', 502)
-  }
-}
+const paperJson = (url: string, fetcher: Fetcher) =>
+  withPaperResponse(url, fetcher, 15_000, async (response) => {
+    try {
+      return await response.json() as unknown
+    } catch (error) {
+      if (error instanceof SyntaxError) throw new InputError('Paper download service returned an invalid response', 502)
+      throw error
+    }
+  })
 
 export async function listPaperVersions(fetcher: Fetcher = fetch): Promise<string[]> {
   const body = await paperJson(paperUrl(), fetcher) as PaperProjectResponse
@@ -137,24 +140,25 @@ export async function downloadPaperJar(
   }
 
   try {
-    const response = await paperFetch(build.url, fetcher, 5 * 60_000)
-    if (!response.body) throw new InputError('Paper download returned an empty response', 502)
+    return await withPaperResponse(build.url, fetcher, 5 * 60_000, async (response, signal) => {
+      if (!response.body) throw new InputError('Paper download returned an empty response', 502)
 
-    const hash = createHash('sha256')
-    let bytes = 0
-    const verify = new Transform({
-      transform(chunk: Buffer, _encoding, callback) {
-        bytes += chunk.length
-        if (bytes > build.size) return callback(new InputError('Paper JAR was larger than expected', 502))
-        hash.update(chunk)
-        callback(null, chunk)
-      },
+      const hash = createHash('sha256')
+      let bytes = 0
+      const verify = new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          bytes += chunk.length
+          if (bytes > build.size) return callback(new InputError('Paper JAR was larger than expected', 502))
+          hash.update(chunk)
+          callback(null, chunk)
+        },
+      })
+      await pipeline(response.body, verify, handle.createWriteStream(), { signal })
+      if (bytes !== build.size || hash.digest('hex') !== build.sha256) {
+        throw new InputError('Paper JAR failed its integrity check', 502)
+      }
+      return { name: build.name, size: build.size, sha256: build.sha256 }
     })
-    await pipeline(response.body, verify, handle.createWriteStream())
-    if (bytes !== build.size || hash.digest('hex') !== build.sha256) {
-      throw new InputError('Paper JAR failed its integrity check', 502)
-    }
-    return { name: build.name, size: build.size, sha256: build.sha256 }
   } catch (error) {
     await handle.close().catch(() => undefined)
     const recycled = await trash(target, { glob: false }).then(() => true).catch(() => false)
