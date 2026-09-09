@@ -396,7 +396,10 @@
   box-shadow: 0 0 28px color-mix(in srgb, var(--primary), transparent 75%);
 }
 
-.brand-mark { filter: drop-shadow(0 0 12px color-mix(in srgb, var(--primary), transparent 65%)); }
+.brand-mark {
+  background: linear-gradient(135deg, var(--primary), var(--chart-4));
+  mask: url('/logo.svg') center / contain no-repeat;
+}
 
 .login-glow { background: radial-gradient(circle at 50% 15%, color-mix(in srgb, var(--primary), transparent 82%), transparent 38%); }
 

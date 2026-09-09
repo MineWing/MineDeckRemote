@@ -157,10 +157,7 @@ export function appendMetricHistory(current: MetricHistory, servers: ServerView[
 
 function Logo({ compact = false }: { compact?: boolean }) {
   return <div className="flex items-center gap-3">
-    <svg aria-hidden="true" viewBox="0 0 48 48" className={`brand-mark ${compact ? 'h-8 w-8' : 'h-10 w-10'} shrink-0 text-foreground`}>
-      <path d="m27.2 14.1 6.1 4.1-16.9 25.1-6.1-4.1 16.9-25.1Z" fill="currentColor" />
-      <path d="M6.8 11.7C15.4 4.1 29.8 3.6 41.3 12l-3.5 5.1c-8.2-5.7-17.5-6-25.9-.2l-5.1-5.2Z" fill="currentColor" />
-    </svg>
+    <span aria-hidden="true" className={`brand-mark ${compact ? 'h-8 w-8' : 'h-10 w-10'} shrink-0`} />
     <div className="leading-none"><div className={`${compact ? 'text-lg' : 'text-xl'} font-black tracking-tight text-foreground`}>MINEDECK</div><div className={`${compact ? 'mt-0.5 text-[8px]' : 'mt-1 text-[10px]'} bg-gradient-to-r from-primary to-chart-4 bg-clip-text font-black tracking-[.3em] text-transparent`}>REMOTE</div></div>
   </div>
 }
