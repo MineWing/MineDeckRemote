@@ -126,10 +126,11 @@ app.get('/api/auth/session', async (request) => ({ authenticated: validSession(r
 
 app.post('/api/auth/login', async (request, reply) => {
   const key = request.ip
-  const attempt = loginAttempts.get(key) ?? { failures: 0, blockedUntil: 0 }
-  if (attempt.blockedUntil > Date.now()) throw new InputError('Too many login attempts; try again later', 429)
+  if ((loginAttempts.get(key)?.blockedUntil ?? 0) > Date.now()) throw new InputError('Too many login attempts; try again later', 429)
   const password = (request.body as { password?: unknown } | null)?.password
   if (!await verifyPassword(password)) {
+    // Read after verification so concurrent failures update the latest count.
+    const attempt = loginAttempts.get(key) ?? { failures: 0, blockedUntil: 0 }
     attempt.failures++
     if (attempt.failures >= 5) {
       attempt.failures = 0

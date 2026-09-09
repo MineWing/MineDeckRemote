@@ -88,3 +88,44 @@ test('host contains malformed upgrades and protocol errors, rejects foreign orig
   assert.equal((await fetch(base + '/api/auth/session')).status, 200)
   assert.equal(child.exitCode, null)
 })
+
+// Exercise the real async password check: all requests start with a fresh IP bucket.
+test('concurrent failed logins accumulate and block the next request', { timeout: 20_000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'minedeck-login-limit-'))
+  const password = 'isolated-rate-limit-password'
+  const child = spawn(process.execPath, ['--import', 'tsx', 'server/index.ts'], {
+    env: { ...process.env, NODE_ENV: 'test', MINEDECK_DATA: join(directory, 'data.json'), MINEDECK_HOST: '127.0.0.1', MINEDECK_PORT: '0', MINEDECK_PASSWORD: password, MINEDECK_MDNS_HOST: '', MINEDECK_TLS_CERT: '', MINEDECK_TLS_KEY: '' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let output = ''
+  child.stdout.on('data', (chunk) => { output += chunk })
+  child.stderr.on('data', (chunk) => { output += chunk })
+  t.after(async () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      const stopped = once(child, 'exit')
+      child.kill('SIGTERM')
+      await stopped
+    }
+  })
+  const base = await new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`Host startup timed out: ${output}`)), 10_000)
+    child.once('exit', () => { clearTimeout(timeout); reject(new Error(`Host exited: ${output}`)) })
+    child.stdout.on('data', () => {
+      const address = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0]
+      if (address) { clearTimeout(timeout); resolve(address) }
+    })
+  })
+  const login = async (value: string) => {
+    const response = await fetch(base + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: value }) })
+    const body = await response.json()
+    return { status: response.status, body }
+  }
+  // A successful login resets earlier failures.
+  for (let i = 0; i < 4; i++) assert.equal((await login('wrong-password')).status, 401)
+  assert.equal((await login(password)).status, 200)
+  const parallel = await Promise.all(Array.from({ length: 8 }, () => login('wrong-password')))
+  assert.ok(parallel.every(({ status }) => status === 401 || status === 429))
+  assert.ok(parallel.filter(({ status }) => status === 401).length >= 5)
+  assert.deepEqual(await login('wrong-password'), { status: 429, body: { error: 'Too many login attempts; try again later' } })
+  assert.equal((await login(password)).status, 429)
+})
