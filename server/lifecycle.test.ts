@@ -181,3 +181,48 @@ test('shutdown stops other servers while a restart is waiting for exit', async (
     assert.ok(manager.list().every((server) => server.pid === null))
   } finally { await manager.shutdown() }
 })
+
+for (const action of ['stop', 'kill'] as const) {
+  test(`${action} cancels a pending automatic restart after a crash`, async () => {
+    const { manager, config, events } = await fixture()
+    try {
+      config.autoRestart = true
+      await writeFile(config.javaPath, `#!${process.execPath}\nprocess.exit(1)\n`, { mode: 0o755 })
+      await manager.start(config.id)
+      await waitUntil(() => events.some((event) => event.type === 'console' && event.line.includes('automatic restart in 5 seconds')))
+      assert.equal(manager.list()[0]?.pid, null)
+      await manager[action](config.id)
+      assert.equal(manager.list()[0]?.status, 'stopped')
+      await assert.rejects(manager[action](config.id), /Server is not running/)
+      await new Promise((resolve) => setTimeout(resolve, 5_100))
+      assert.equal(manager.list()[0]?.pid, null)
+      assert.equal(events.filter((event) => event.type === 'console' && event.line.includes('MineDeck: starting')).length, 1)
+    } finally { await manager.shutdown() }
+  })
+}
+
+test('stop cancels an automatic restart callback queued behind another transaction', async () => {
+  const { manager, config, events } = await fixture()
+  let release: (() => void) | undefined
+  try {
+    config.autoRestart = true
+    await writeFile(config.javaPath, `#!${process.execPath}\nprocess.exit(1)\n`, { mode: 0o755 })
+    await manager.start(config.id)
+    await waitUntil(() => events.some((event) => event.type === 'console' && event.line.includes('automatic restart in 5 seconds')))
+    const blocked = manager.transaction(() => new Promise<void>((resolve) => { release = resolve }))
+    await waitUntil(() => Boolean(release))
+    const stopping = manager.stop(config.id)
+    await new Promise((resolve) => setTimeout(resolve, 5_100))
+    release!()
+    await blocked
+    await stopping
+    // Drain the callback that fired while the persistence queue was blocked.
+    await manager.transaction(async () => {})
+    assert.equal(manager.list()[0]?.status, 'stopped')
+    assert.equal(manager.list()[0]?.pid, null)
+    assert.equal(events.filter((event) => event.type === 'console' && event.line.includes('MineDeck: starting')).length, 1)
+  } finally {
+    release?.()
+    await manager.shutdown()
+  }
+})

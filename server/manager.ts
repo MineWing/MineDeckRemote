@@ -186,6 +186,7 @@ export class ServerManager {
       throw error
     }
     if (state.restartTimer) clearTimeout(state.restartTimer)
+    state.restartTimer = undefined
     this.states.delete(id)
     this.changed()
   }
@@ -208,6 +209,7 @@ export class ServerManager {
       }
     }
     if (state.restartTimer) clearTimeout(state.restartTimer)
+    state.restartTimer = undefined
 
     if (this.shuttingDown) throw new InputError('Host is shutting down', 409)
     const child = spawn(
@@ -235,13 +237,27 @@ export class ServerManager {
 
   stop(id: string) {
     return this.transaction(async () => {
+      this.get(id)
       const state = this.state(id)
+      if (this.cancelAutomaticRestart(id) && !state.process) return
       if (state.restartRequested) {
         state.restartRequested = undefined
         if (state.status === 'stopping') return
       }
       this.stopProcess(id)
     })
+  }
+
+  private cancelAutomaticRestart(id: string) {
+    const state = this.state(id)
+    if (!state.restartTimer) return false
+    clearTimeout(state.restartTimer)
+    state.restartTimer = undefined
+    state.manualStop = true
+    if (!state.process) state.status = 'stopped'
+    this.log(id, 'MineDeck: automatic restart cancelled')
+    this.changed()
+    return true
   }
 
   private stopProcess(id: string) {
@@ -286,6 +302,7 @@ export class ServerManager {
     return this.transaction(async () => {
       this.get(id)
       const state = this.state(id)
+      if (this.cancelAutomaticRestart(id) && !state.process) return
       if (!state.process) throw new InputError('Server is not running', 409)
       state.manualStop = true
       state.restartRequested = undefined
@@ -315,6 +332,7 @@ export class ServerManager {
     const waits: Promise<unknown>[] = []
     for (const [id, state] of this.states) {
       if (state.restartTimer) clearTimeout(state.restartTimer)
+      state.restartTimer = undefined
       if (!state.process) continue
       // Normal stop owns the configured deadline, including a stop already underway.
       const exited = new Promise<void>((resolve) => state.process!.once('close', () => resolve()))
@@ -443,7 +461,13 @@ export class ServerManager {
         }
         if (config.autoRestart && !this.shuttingDown && !state.process && state.status === 'crashed') {
           this.log(id, 'MineDeck: automatic restart in 5 seconds')
-          state.restartTimer = setTimeout(() => void this.start(id).catch((error) => this.log(id, `MineDeck: restart failed: ${error.message}`)), 5_000)
+          const timer = setTimeout(() => void this.transaction(async () => {
+            // A stop may cancel the timer after it fires but before this transaction runs.
+            if (state.restartTimer !== timer) return
+            state.restartTimer = undefined
+            await this.startProcess(id)
+          }).catch((error) => this.log(id, `MineDeck: restart failed: ${error.message}`)), 5_000)
+          state.restartTimer = timer
         }
       }
     })
