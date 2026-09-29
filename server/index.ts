@@ -104,6 +104,7 @@ const publish = (event: SocketEvent) => {
   }
 }
 const manager = new ServerManager(data, save, publish)
+await manager.restoreEulaState()
 
 app.setErrorHandler((error, _request, reply) => {
   const known = error as { statusCode?: number; message?: string }

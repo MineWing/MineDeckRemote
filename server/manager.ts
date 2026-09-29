@@ -79,6 +79,17 @@ export class ServerManager {
     this.metricsTimer = setInterval(() => void this.updateMetrics(), 1_000)
   }
 
+  async restoreEulaState() {
+    for (const config of this.data.servers) {
+      try {
+        this.state(config.id).eulaRequired = (await readEula(config.directory))?.required ?? false
+      } catch (error) {
+        this.log(config.id, `MineDeck: could not read EULA: ${(error as Error).message}`)
+      }
+    }
+    this.changed()
+  }
+
   list() {
     return this.data.servers.map((server) => this.view(server))
   }
@@ -427,6 +438,10 @@ export class ServerManager {
   private log(id: string, rawLine: string) {
     const state = this.state(id)
     const line = rawLine.replace(ANSI, '')
+    if (state.status === 'starting' && /(?:Failed to load eula\.txt|You need to agree to the EULA in order to run the server\.)/i.test(line)) {
+      state.eulaRequired = true
+      this.changed()
+    }
     const players = parsePlayerListLine(line)
     if (players) {
       state.onlinePlayers = players.count
@@ -471,7 +486,7 @@ export class ServerManager {
       const config = this.data.servers.find((server) => server.id === id)
       if (config) {
         try {
-          state.eulaRequired = (await readEula(config.directory))?.required ?? false
+          state.eulaRequired = (await readEula(config.directory))?.required ?? state.eulaRequired
         } catch (error) {
           this.log(id, `MineDeck: could not read EULA: ${(error as Error).message}`)
           // An unreadable EULA must not cause an automatic restart loop.

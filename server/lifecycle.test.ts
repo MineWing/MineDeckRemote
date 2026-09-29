@@ -255,3 +255,31 @@ test('stop cancels an automatic restart callback queued behind another transacti
     await manager.shutdown()
   }
 })
+
+
+test('Minecraft EULA warning publishes the prompt before the Java process exits', async () => {
+  const { manager, config, events } = await fixture()
+  await writeFile(config.javaPath, `#!${process.execPath}
+console.log('[00:54:25 WARN]: Failed to load eula.txt');
+console.log('[00:54:25 INFO]: You need to agree to the EULA in order to run the server. Go to eula.txt for more info.');
+process.stdin.on('data', () => process.exit(0));
+`, { mode: 0o755 })
+  try {
+    await manager.start(config.id)
+    await waitUntil(() => events.some((event) => event.type === 'console' && event.line.includes('You need to agree')))
+    assert.equal(manager.list()[0]?.eulaRequired, true)
+    assert.ok(events.some((event) => event.type === 'servers' && event.servers[0]?.eulaRequired))
+    assert.ok(manager.list()[0]?.pid)
+  } finally { await manager.shutdown() }
+})
+
+
+test('host startup restores a pending EULA prompt from the server folder', async () => {
+  const { manager, config } = await fixture()
+  try {
+    await writeFile(join(config.directory, 'eula.txt'), 'eula=false\n')
+    await manager.restoreEulaState()
+    assert.equal(manager.list()[0]?.eulaRequired, true)
+    assert.equal(manager.list()[0]?.pid, null)
+  } finally { await manager.shutdown() }
+})

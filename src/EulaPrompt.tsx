@@ -31,10 +31,11 @@ export function EulaPrompt({ servers, accept }: { servers: ServerView[]; accept:
         {server.name} requires your acceptance of the <a className="underline" href="https://www.minecraft.net/eula" target="_blank" rel="noreferrer">Minecraft End User License Agreement</a>.
         {' '}Yes saves eula=true in this server's eula.txt. You can then press Start. No leaves the file unchanged and the server stopped.
       </Dialog.Description>
+      {server.pid !== null && <p role="status" className="mt-4 text-sm">Waiting for the server to stop before saving acceptance.</p>}
       {error && <p role="alert" className="mt-4 text-destructive">{error}</p>}
       <div className="mt-6 flex justify-end gap-3" aria-busy={busy}>
         <button className={`${button} bg-[#b42332]`} disabled={busy} onClick={dismiss}>No</button>
-        <button className={`${button} bg-[#18733b]`} disabled={busy} onClick={() => void confirm()}>{busy ? 'Saving…' : 'Yes'}</button>
+        <button className={`${button} bg-[#18733b]`} disabled={busy || server.pid !== null} onClick={() => void confirm()}>{busy ? 'Saving…' : 'Yes'}</button>
       </div>
     </Dialog.Content>
   </Dialog.Portal></Dialog.Root>
