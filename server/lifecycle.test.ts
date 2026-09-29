@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -26,6 +26,35 @@ const waitUntil = async (condition: () => boolean) => {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
+
+test('first launch generates an unaccepted EULA, pauses auto restart, and resumes only after acceptance', async () => {
+  const { manager, config, data, events } = await fixture()
+  config.autoRestart = true
+  await writeFile(config.javaPath, `#!${process.execPath}
+const fs = require('node:fs');
+if (!fs.existsSync('eula.txt')) fs.writeFileSync('eula.txt', '# Minecraft EULA\\neula=false\\n');
+if (!fs.readFileSync('eula.txt', 'utf8').includes('eula=true')) process.exit(0);
+console.log('Done (0.1s)!');
+process.stdin.on('data', () => process.exit(0));
+`, { mode: 0o755 })
+  try {
+    await assert.rejects(manager.acceptEula(config.id), /Start the server first/)
+    await manager.start(config.id)
+    await waitUntil(() => manager.list()[0]?.eulaRequired === true)
+    assert.equal(manager.list()[0]?.status, 'stopped')
+    assert.equal(data.stats[config.id], undefined)
+    const blocked = await manager.start(config.id)
+    assert.equal(blocked.pid, null)
+    assert.equal(await readFile(join(config.directory, 'eula.txt'), 'utf8'), '# Minecraft EULA\neula=false\n')
+    assert.ok(!events.some((event) => event.type === 'console' && event.line.includes('automatic restart')))
+    await manager.acceptEula(config.id)
+    assert.equal(await readFile(join(config.directory, 'eula.txt'), 'utf8'), '# Minecraft EULA\neula=true\n')
+    assert.equal(manager.list()[0]?.eulaRequired, false)
+    await manager.start(config.id)
+    await waitUntil(() => manager.list()[0]?.status === 'running')
+    await assert.rejects(manager.acceptEula(config.id), /Stop the server/)
+  } finally { await manager.shutdown() }
+})
 
 test('concurrent starts launch exactly one process and reject conflicting mutations', async () => {
   const { manager, config, events } = await fixture()

@@ -12,6 +12,7 @@ import type { FileEntry, PaperBuild, PlayerAction, PlayerView, ServerStatus, Ser
 import { Dialog } from 'radix-ui'
 import { appendLogLine, mergeLogHistory, type LogHistory, type LegacyLogSnapshot } from './lib/log-history'
 import { copyText } from './lib/clipboard'
+import { EulaPrompt } from './EulaPrompt'
 const FileEditor = lazy(() => import('./FileEditor'))
 
 class ApiError extends Error {
@@ -769,6 +770,7 @@ function ThemeFooter({ selected, onChange, offset = false }: { selected: AppThem
 }
 
 function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; theme: AppTheme; onThemeChange: (theme: AppTheme) => void }) {
+  const [eulaAttempt, setEulaAttempt] = useState(0)
   const [servers, setServers] = useState<ServerView[]>([])
   const [leaveAction, setLeaveAction] = useState<(() => void) | null>(null)
   const fileDirty = useRef(false)
@@ -886,6 +888,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
 
   const action = async (name: 'start' | 'stop' | 'restart' | 'kill') => {
     if (!selected) return
+    if (name === 'start' || name === 'restart') setEulaAttempt((value) => value + 1)
     setError('')
     if (name === 'restart') restarting.current.add(selected.id)
     try { await api(`/api/servers/${selected.id}/actions/${name}`, { method: 'POST' }) }
@@ -934,6 +937,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
   return <div className="flex min-h-screen flex-col bg-background text-foreground">
     {leaveAction && <ConfirmationModal title="Discard unsaved file changes?" message="Your file has unsaved changes. Discard them and continue?" confirmLabel="Discard changes" busyLabel="Leaving…" busy={false} onClose={() => setLeaveAction(null)} onConfirm={() => { setLeaveAction(null); allowLeave.current = true; try { leaveAction() } finally { allowLeave.current = false } }} />}
     <Toasts items={toasts} onDismiss={(id) => setToasts((items) => items.filter((item) => item.id !== id))} />
+    <EulaPrompt key={eulaAttempt} servers={servers} accept={(id) => api(`/api/servers/${id}/eula/accept`, { method: 'POST' })} />
     {selected && <aside className="fixed inset-y-0 left-0 z-20 hidden w-72 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground lg:flex">
       <div className="border-b border-sidebar-border p-5"><Logo /></div>
       <div className="border-b border-sidebar-border p-4">

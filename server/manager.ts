@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import type { ServerConfig, ServerStatus, ServerView, SocketEvent } from '../shared.ts'
 import { InputError, resolveInside } from './core.ts'
 import { normaliseUuid, playerCommand, readPlayers } from './players.ts'
+import { readEula, acceptEula } from './eula.ts'
 
 const execFileAsync = promisify(execFile)
 const ANSI = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g
@@ -45,6 +46,7 @@ export interface StoredData {
 }
 
 interface Runtime {
+  eulaRequired?: boolean
   status: ServerStatus
   process?: ChildProcessWithoutNullStreams
   startedAt?: number
@@ -195,6 +197,18 @@ export class ServerManager {
     return this.transaction(() => this.startProcess(id))
   }
 
+  acceptEula(id: string) {
+    return this.transaction(async () => {
+      const config = this.get(id)
+      const state = this.state(id)
+      if (state.process || state.restartRequested) throw new InputError('Stop the server before accepting the EULA', 409)
+      await acceptEula(config.directory)
+      state.eulaRequired = false
+      this.changed()
+      return this.view(config)
+    })
+  }
+
   private async startProcess(id: string, restarting = false) {
     if (this.shuttingDown) throw new InputError('Host is shutting down', 409)
     const config = this.get(id)
@@ -210,6 +224,13 @@ export class ServerManager {
     }
     if (state.restartTimer) clearTimeout(state.restartTimer)
     state.restartTimer = undefined
+
+    state.eulaRequired = (await readEula(config.directory))?.required ?? false
+    if (state.eulaRequired) {
+      state.status = 'stopped'
+      this.changed()
+      return this.view(config)
+    }
 
     if (this.shuttingDown) throw new InputError('Host is shutting down', 409)
     const child = spawn(
@@ -381,6 +402,7 @@ export class ServerManager {
     const stats = this.data.stats[config.id] ?? { crashCount: 0, lastCrashAt: null, exitCode: null }
     return {
       ...config,
+      eulaRequired: state.eulaRequired ?? false,
       status: state.status,
       pid: state.process?.pid ?? null,
       uptimeSeconds: state.startedAt && state.process ? Math.floor((Date.now() - state.startedAt) / 1_000) : 0,
@@ -447,6 +469,21 @@ export class ServerManager {
 
     await this.transaction(async () => {
       const config = this.data.servers.find((server) => server.id === id)
+      if (config) {
+        try {
+          state.eulaRequired = (await readEula(config.directory))?.required ?? false
+        } catch (error) {
+          this.log(id, `MineDeck: could not read EULA: ${(error as Error).message}`)
+          // An unreadable EULA must not cause an automatic restart loop.
+          this.changed()
+          return
+        }
+        if (state.eulaRequired) {
+          state.status = 'stopped'
+          this.log(id, 'MineDeck: accept the Minecraft EULA before starting this server')
+          return
+        }
+      }
       if (!manual && config) {
         const previous = this.data.stats[id]
         this.data.stats[id] = {
