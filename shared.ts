@@ -15,6 +15,7 @@ export interface ServerConfig {
 }
 
 export interface ServerView extends ServerConfig {
+  eulaRequired?: boolean
   status: ServerStatus
   pid: number | null
   uptimeSeconds: number

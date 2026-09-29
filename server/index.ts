@@ -226,6 +226,9 @@ app.post('/api/servers/:id/command', async (request) => {
   return { ok: true }
 })
 
+app.post('/api/servers/:id/eula/accept', async (request) =>
+  manager.acceptEula((request.params as { id: string }).id))
+
 app.get('/api/servers/:id/console', async (request) => ({ lines: manager.getConsole((request.params as { id: string }).id), ...manager.getConsoleSnapshot((request.params as { id: string }).id) }))
 
 app.get('/api/servers/:id/players', async (request) => manager.listPlayers((request.params as { id: string }).id))
