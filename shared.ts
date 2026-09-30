@@ -16,6 +16,7 @@ export interface ServerConfig {
 
 export interface ServerView extends ServerConfig {
   eulaRequired?: boolean
+  pluginsInstalling?: boolean
   status: ServerStatus
   pid: number | null
   uptimeSeconds: number
@@ -62,3 +63,11 @@ export interface ConsoleLine {
 export type SocketEvent =
   | { type: 'servers'; servers: ServerView[] }
   | { type: 'console'; serverId: string; line: string; sequence: number; epoch: string }
+
+export const pluginLoaders = ['paper', 'spigot', 'bukkit', 'purpur', 'folia', 'velocity', 'bungeecord', 'waterfall'] as const
+export type PluginLoader = typeof pluginLoaders[number]
+export interface PluginTarget { loader: PluginLoader; gameVersion: string }
+export interface ModrinthProject { id: string; slug: string; title: string; description: string; author: string; downloads: number }
+export interface ModrinthVersion { id: string; projectId: string; name: string; number: string; published: string }
+export interface PluginInstallItem extends ModrinthVersion { filename: string; size: number; sha512: string }
+export interface PluginPlan { items: PluginInstallItem[]; fingerprint: string }

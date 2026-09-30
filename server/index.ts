@@ -17,6 +17,9 @@ import { ServerManager, type StoredData } from './manager.ts'
 import { Sessions, sessionToken, validOrigin } from './security.ts'
 import { createSaveQueue, readEditableFile, saveEditableFile } from './storage.ts'
 import { downloadPaperJar, listPaperBuilds, listPaperVersions } from './paper.ts'
+import { searchPlugins, pluginVersions, planPlugins } from './modrinth.ts'
+import { detectPluginTarget } from './plugin-target.ts'
+import { installedPlugins, installServerPlugins } from './plugins.ts'
 
 const scryptAsync = promisify(scrypt)
 const DATA_PATH = resolve(process.env.MINEDECK_DATA ?? 'data/minedeck.json')
@@ -171,6 +174,31 @@ app.post('/api/auth/password', async (request, reply) => {
 })
 
 app.get('/api/servers', async () => manager.list())
+
+app.get('/api/servers/:id/plugins/target', async (request) =>
+  detectPluginTarget(manager.get((request.params as { id: string }).id)))
+app.get('/api/servers/:id/plugins/search', async (request) => {
+  const query = request.query as { query?: unknown; offset?: unknown }
+  const target = await detectPluginTarget(manager.get((request.params as { id: string }).id))
+  return searchPlugins(query.query ?? '', target, query.offset ?? 0)
+})
+app.get('/api/servers/:id/plugins/projects/:project/versions', async (request) => {
+  const { id, project } = request.params as { id: string; project: string }
+  return { versions: await pluginVersions(project, await detectPluginTarget(manager.get(id))) }
+})
+app.post('/api/servers/:id/plugins/plan', async (request) => {
+  const target = await detectPluginTarget(manager.get((request.params as { id: string }).id))
+  const body = request.body as { versionId?: unknown } | null
+  const plan = await planPlugins(body?.versionId, target)
+  return { ...plan, items: plan.items.map(({ url: _url, ...item }) => item) }
+})
+app.get('/api/servers/:id/plugins', async (request) => ({
+  files: await installedPlugins(manager.get((request.params as { id: string }).id).directory),
+}))
+app.post('/api/servers/:id/plugins/install', async (request) => {
+  const id = (request.params as { id: string }).id
+  return manager.installPlugins(id, () => installServerPlugins(manager.get(id), request.body))
+})
 
 app.get('/api/paper/versions', async () => ({ versions: await listPaperVersions() }))
 

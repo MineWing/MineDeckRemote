@@ -283,3 +283,24 @@ test('host startup restores a pending EULA prompt from the server folder', async
     assert.equal(manager.list()[0]?.pid, null)
   } finally { await manager.shutdown() }
 })
+
+test('plugin installation locks launches and configuration, then releases on success or failure', async () => {
+  const { manager, config } = await fixture()
+  let finish!: () => void
+  const held = new Promise<void>((resolve) => { finish = resolve })
+  try {
+    const installation = manager.installPlugins(config.id, async (directory) => { assert.equal(directory, config.directory); await held })
+    await waitUntil(() => manager.list()[0]?.pluginsInstalling === true)
+    await assert.rejects(manager.start(config.id), /plugin installation/)
+    await assert.rejects(manager.update(config.id, { ...config, name: 'Changed' }), /Stop the server/)
+    await assert.rejects(manager.installPlugins(config.id, async () => {}), /other plugin installations/)
+    await assert.rejects(manager.remove(config.id), /plugin installations/)
+    finish()
+    await installation
+    assert.equal(manager.list()[0]?.pluginsInstalling, false)
+    await assert.rejects(manager.installPlugins(config.id, async () => { throw new Error('download failed') }), /download failed/)
+    assert.equal(manager.list()[0]?.pluginsInstalling, false)
+    await manager.start(config.id)
+    await assert.rejects(manager.installPlugins(config.id, async () => {}), /Stop the server/)
+  } finally { finish(); await manager.shutdown() }
+})

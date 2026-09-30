@@ -35,6 +35,7 @@ Run, monitor, edit, and recover your servers from any browser on your local netw
 - Streams console output over WebSockets and sends console commands
 - Shows status, uptime, Java CPU/RAM, online players, and crash history
 - Optionally restarts a server five seconds after an unexpected exit
+- Browses Modrinth plugins by server software and Minecraft version, reviews required dependencies, and installs verified JARs while the server is stopped
 - Edits server launch settings, memory limits, Java arguments, and stop timeout
 - Downloads stable Paper server JARs directly from PaperMC and verifies their SHA-256 checksums
 - Browses files, uploads binary files, and syntax-highlights editable text/config files inside each server folder
@@ -141,3 +142,9 @@ npm run build
 ```
 
 The Vite dashboard runs on port 5173 in development and proxies the API/WebSocket connection to Fastify on port 8787.
+
+### Install plugins from Modrinth
+
+Open a server's **Plugins** tab and search Modrinth. MineDeck detects the server software and Minecraft version from the configured JAR and its current startup log. Search, release selection, dependencies, and installation are restricted to that detected combination. If detection is unavailable, start the server once and refresh; there is no manual compatibility override. Select a stable release to review the plugin and its required dependencies. Stop the server, choose **Install**, then start it to load the new plugins. Vanilla servers do not support plugins.
+
+MineDeck checks each download's size and SHA-512 checksum. Managed files use `modrinth-PROJECT_ID.jar` names to prevent duplicate managed versions. Existing files are never overwritten. To replace a managed version, move its old JAR to Trash from the Files tab first. Identical manually uploaded JARs are recognized; check for older manually installed versions before adding a replacement. Dependencies without a compatible Modrinth release must be installed manually.
