@@ -67,7 +67,7 @@ export type SocketEvent =
 export const pluginLoaders = ['paper', 'spigot', 'bukkit', 'purpur', 'folia', 'velocity', 'bungeecord', 'waterfall'] as const
 export type PluginLoader = typeof pluginLoaders[number]
 export interface PluginTarget { loader: PluginLoader; gameVersion: string }
-export interface ModrinthProject { id: string; slug: string; title: string; description: string; author: string; downloads: number }
+export interface ModrinthProject { id: string; slug: string; title: string; description: string; author: string; downloads: number; iconUrl: string | null }
 export interface ModrinthVersion { id: string; projectId: string; name: string; number: string; published: string }
 export interface PluginInstallItem extends ModrinthVersion { filename: string; size: number; sha512: string }
 export interface PluginPlan { items: PluginInstallItem[]; fingerprint: string }

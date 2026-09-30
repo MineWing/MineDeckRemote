@@ -77,7 +77,7 @@ export async function searchPlugins(query: unknown, targetValue: unknown, offset
   if (!body || !Array.isArray(body.hits) || typeof body.total_hits !== 'number') throw new InputError('Invalid Modrinth search response', 502)
   const projects = body.hits.flatMap((hit): ModrinthProject[] => {
     if (!hit || typeof hit.project_id !== 'string' || !idPattern.test(hit.project_id) || typeof hit.slug !== 'string' || !idPattern.test(hit.slug) || typeof hit.title !== 'string' || typeof hit.description !== 'string' || typeof hit.author !== 'string' || typeof hit.downloads !== 'number') return []
-    return [{ id: hit.project_id, slug: hit.slug, title: hit.title, description: hit.description, author: hit.author, downloads: hit.downloads }]
+    return [{ id: hit.project_id, slug: hit.slug, title: hit.title, description: hit.description, author: hit.author, downloads: hit.downloads, iconUrl: typeof hit.icon_url === 'string' && trustedDownload(hit.icon_url) ? hit.icon_url : null }]
   })
   return { projects, total: body.total_hits, offset }
 }

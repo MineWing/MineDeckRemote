@@ -37,6 +37,12 @@ test('Modrinth search uses loader/version facets and preserves plugin/mod hybrid
   assert.throws(() => pluginTarget({ loader: 'fabric', gameVersion: '1.21.11' }), /Choose a plugin/)
 })
 
+test('search preserves trusted icons and handles missing or untrusted icons', async () => {
+  const icons = ['https://cdn.modrinth.com/data/Project1/icon.webp', null, 'https://example.com/icon.png', 'http://cdn.modrinth.com/data/icon.png']
+  const fetcher: Fetcher = async () => Response.json({ hits: icons.map((icon_url, index) => ({ project_id: `Project${index}`, slug: `plugin-${index}`, title: 'Plugin', description: 'Description', author: 'Author', downloads: 50, icon_url })), total_hits: icons.length })
+  assert.deepEqual((await searchPlugins('', target, 0, fetcher)).projects.map((project) => project.iconUrl), [icons[0], null, null, null])
+})
+
 test('versions exclude prereleases and incompatible loaders even if the API returns them', async () => {
   const stable = release()
   const beta = { ...release('Beta'), version_type: 'beta' }
