@@ -98,21 +98,16 @@ const browserPlatform = () => {
 }
 
 export const appThemes = [
-  { id: 'dracula', name: 'Dracula' },
-  { id: 'tiesen', name: 'Tiesen' },
-  { id: 'portfolio', name: 'Portfolio' },
-  { id: '2077', name: '2077' },
-  { id: 'nlan', name: 'NLAN' },
-  { id: 'discord', name: 'Discord' },
-  { id: 'terminal', name: 'Iconic Terminal' },
+  { id: 'light', name: 'Light' },
+  { id: 'dark', name: 'Dark' },
 ] as const
 type AppTheme = (typeof appThemes)[number]['id']
 export const isAppTheme = (value: unknown): value is AppTheme => appThemes.some((theme) => theme.id === value)
 const storedTheme = (): AppTheme => {
   try {
     const value = localStorage.getItem('minedeck-theme')
-    return isAppTheme(value) ? value : 'dracula'
-  } catch { return 'dracula' }
+    return isAppTheme(value) ? value : 'dark'
+  } catch { return 'dark' }
 }
 
 const prettyStatus = (status: ServerStatus) => status.charAt(0).toUpperCase() + status.slice(1)
@@ -1016,6 +1011,7 @@ export default function App() {
   const [theme, setTheme] = useState<AppTheme>(storedTheme)
   useEffect(() => {
     document.documentElement.dataset.theme = theme
+    document.documentElement.classList.toggle('dark', theme === 'dark')
     try { localStorage.setItem('minedeck-theme', theme) } catch { /* Storage can be unavailable in private browsing. */ }
     const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
     themeColor?.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--background').trim())

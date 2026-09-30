@@ -33,10 +33,11 @@ test('editor shortcut labels follow the browser platform', () => {
   assert.equal(shortcutLabel('f', 'Linux x86_64'), 'Ctrl+F')
 })
 
-test('only bundled dark themes are accepted', () => {
-  assert.equal(isAppTheme('dracula'), true)
-  assert.equal(isAppTheme('terminal'), true)
-  assert.equal(isAppTheme('light'), false)
+test('only light and dark themes are accepted', () => {
+  assert.equal(isAppTheme('dracula'), false)
+  assert.equal(isAppTheme('terminal'), false)
+  assert.equal(isAppTheme('light'), true)
+  assert.equal(isAppTheme('dark'), true)
   assert.equal(isAppTheme(null), false)
 })
 
