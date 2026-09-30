@@ -13,6 +13,7 @@ import { Dialog } from 'radix-ui'
 import { appendLogLine, mergeLogHistory, type LogHistory, type LegacyLogSnapshot } from './lib/log-history'
 import { copyText } from './lib/clipboard'
 import { EulaPrompt } from './EulaPrompt'
+import { Plugins } from './Plugins'
 const FileEditor = lazy(() => import('./FileEditor'))
 
 class ApiError extends Error {
@@ -111,7 +112,7 @@ const storedTheme = (): AppTheme => {
 }
 
 const prettyStatus = (status: ServerStatus) => status.charAt(0).toUpperCase() + status.slice(1)
-const tabs = ['console', 'players', 'files', 'configuration'] as const
+const tabs = ['console', 'players', 'plugins', 'files', 'configuration'] as const
 const serverIdFromPath = () => {
   const match = window.location.pathname.match(/^\/servers\/([^/]+)\/?$/)
   if (!match) return ''
@@ -972,6 +973,7 @@ function Dashboard({ onLogout, theme, onThemeChange }: { onLogout: () => void; t
         </div>
         {tab === 'console' && <Console key={selected.id} server={selected} address={serverAddresses[selected.id]} lines={selectedLines} samples={metricHistory[selected.id] ?? []} onCommand={(command) => api(`/api/servers/${selected.id}/command`, { method: 'POST', body: JSON.stringify({ command }) })} />}
         {tab === 'players' && <Players server={selected} />}
+        {tab === 'plugins' && <Plugins key={selected.id} server={selected} request={api} />}
         {tab === 'files' && <Files key={selected.id} server={selected} onDirty={onFileDirty} />}
         {tab === 'configuration' && <Card className="gap-0 overflow-hidden py-0"><div className="border-b border-border px-5 py-4"><h2 className="font-bold text-card-foreground">Server configuration</h2><p className="mt-1 text-xs text-muted-foreground">Stop the server before changing launch settings.</p></div><ServerForm server={selected} onSaved={(saved) => setServers((items) => items.map((item) => item.id === saved.id ? saved : item))} onDelete={() => setPendingRemoval(selected)} /></Card>}
       </div> : servers.length ? <div className="mx-auto max-w-5xl p-6 sm:p-10 lg:p-14"><div className="flex flex-wrap items-end justify-between gap-4"><div><h1 className="text-3xl font-black tracking-tight text-foreground">Select a server</h1><p className="mt-2 text-sm text-muted-foreground">Choose a server before opening its console, files, or configuration.</p></div><Button onClick={() => setAddOpen(true)}><Plus />Add server</Button></div>{error && <Alert variant="destructive" className="mt-5"><AlertDescription>{error}</AlertDescription></Alert>}<div className="mt-8 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">{servers.map((server) => {

@@ -50,6 +50,11 @@ test('host contains malformed upgrades and protocol errors, rejects foreign orig
     })
     assert.equal(status, 401)
   }
+  for (const [path, method] of [
+    ['/api/servers/example/plugins/target', 'GET'], ['/api/servers/example/plugins/search', 'GET'],
+    ['/api/servers/example/plugins/projects/example/versions', 'GET'], ['/api/servers/example/plugins/plan', 'POST'],
+    ['/api/servers/example/plugins', 'GET'], ['/api/servers/example/plugins/install', 'POST'],
+  ]) assert.equal((await fetch(base + path, { method })).status, 401)
   await rejectUpgrade('md_session=%')
   assert.equal((await fetch(base + '/api/auth/session')).status, 200)
   const login = async () => {

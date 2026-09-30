@@ -46,6 +46,7 @@ export interface StoredData {
 }
 
 interface Runtime {
+  pluginsInstalling?: boolean
   eulaRequired?: boolean
   status: ServerStatus
   process?: ChildProcessWithoutNullStreams
@@ -69,6 +70,7 @@ export class ServerManager {
   private metricsBusy = false
   private operations: Promise<unknown> = Promise.resolve()
   private shuttingDown = false
+  private pluginTasks = new Set<Promise<unknown>>()
 
   constructor(
     private data: StoredData,
@@ -166,7 +168,7 @@ export class ServerManager {
 
   private async updateConfig(id: string, config: ServerConfig) {
     const current = this.get(id)
-    if (this.state(id).process || this.state(id).restartRequested) throw new InputError('Stop the server before changing its configuration', 409)
+    if (this.state(id).pluginsInstalling || this.state(id).process || this.state(id).restartRequested) throw new InputError('Stop the server before changing its configuration', 409)
     if (this.data.servers.some((server) => server.id !== id && server.name.toLowerCase() === config.name.toLowerCase())) {
       throw new InputError('A server with this name already exists', 409)
     }
@@ -188,7 +190,7 @@ export class ServerManager {
   private async removeConfig(id: string) {
     const server = this.get(id)
     const state = this.state(id)
-    if (state.process || state.restartRequested) throw new InputError('Stop the server before removing it', 409)
+    if (state.pluginsInstalling || state.process || state.restartRequested) throw new InputError('Stop the server and finish plugin installations before removing it', 409)
     const index = this.data.servers.indexOf(server)
     const stats = this.data.stats[id]
     this.data.servers.splice(index, 1)
@@ -202,6 +204,27 @@ export class ServerManager {
     state.restartTimer = undefined
     this.states.delete(id)
     this.changed()
+  }
+
+  async installPlugins<T>(id: string, install: (directory: string) => Promise<T>): Promise<T> {
+    const { config, state } = await this.transaction(async () => {
+      if (this.shuttingDown) throw new InputError('Host is shutting down', 409)
+      const config = this.get(id)
+      const state = this.state(id)
+      if (this.data.servers.some((server) => server.directory === config.directory && (this.state(server.id).process || this.state(server.id).restartRequested || this.state(server.id).restartTimer || this.state(server.id).pluginsInstalling))) {
+        throw new InputError('Stop the server and wait for other plugin installations to finish', 409)
+      }
+      state.pluginsInstalling = true
+      this.changed()
+      return { config, state }
+    })
+    const task = Promise.resolve().then(() => install(config.directory))
+    this.pluginTasks.add(task)
+    try { return await task }
+    finally {
+      this.pluginTasks.delete(task)
+      await this.transaction(async () => { state.pluginsInstalling = false; this.changed() })
+    }
   }
 
   start(id: string) {
@@ -227,6 +250,7 @@ export class ServerManager {
     if ((!restarting && state.restartRequested) || state.process || state.status === 'starting' || state.status === 'running' || state.status === 'stopping') {
       throw new InputError('Server is already running or changing state', 409)
     }
+    if (this.data.servers.some((server) => server.directory === config.directory && this.state(server.id).pluginsInstalling)) throw new InputError('Wait for the plugin installation to finish before starting the server', 409)
     const target = await this.target(config)
     for (const other of this.data.servers) {
       if (other.id !== id && this.state(other.id).process && await this.target(other) === target) {
@@ -372,6 +396,7 @@ export class ServerManager {
       waits.push(exited)
     }
     await Promise.all(waits)
+    await Promise.allSettled([...this.pluginTasks])
     await this.operations
   }
 
@@ -414,6 +439,7 @@ export class ServerManager {
     return {
       ...config,
       eulaRequired: state.eulaRequired ?? false,
+      pluginsInstalling: state.pluginsInstalling ?? false,
       status: state.status,
       pid: state.process?.pid ?? null,
       uptimeSeconds: state.startedAt && state.process ? Math.floor((Date.now() - state.startedAt) / 1_000) : 0,
