@@ -9,6 +9,17 @@ function Skeleton({ label }: { label: string }) {
   return <div role="status" aria-label={label} className="space-y-3 py-5"><span className="sr-only">{label}</span>{[0, 1, 2, 3].map((item) => <div key={item} className="h-14 animate-pulse bg-muted" />)}</div>
 }
 
+function PluginIcon({ project }: { project: ModrinthProject }) {
+  const [failed, setFailed] = useState(false)
+  return <div className="mb-4 flex h-20 w-20 shrink-0 items-center justify-center bg-muted">
+    {project.iconUrl && !failed ? <img src={project.iconUrl} alt="" width={80} height={80} loading="lazy" referrerPolicy="no-referrer" className="h-full w-full object-contain" onError={() => setFailed(true)} /> : <span aria-hidden="true" className="text-2xl font-bold text-muted-foreground">{project.title.slice(0, 2).toUpperCase()}</span>}
+  </div>
+}
+
+function PluginCardsSkeleton() {
+  return <div role="status" aria-label="Searching Modrinth" className="grid gap-4 sm:grid-cols-2"><span className="sr-only">Searching Modrinth</span>{[0, 1, 2, 3].map((item) => <div key={item} className="space-y-4 border border-border p-5"><div className="h-20 w-20 animate-pulse bg-muted" /><div className="h-6 w-2/3 animate-pulse bg-muted" /><div className="h-3 w-1/2 animate-pulse bg-muted" /><div className="h-16 animate-pulse bg-muted" /><div className="h-10 animate-pulse bg-muted" /></div>)}</div>
+}
+
 export function Plugins({ server, request }: { server: ServerView; request: Request }) {
   const [target, setTarget] = useState<PluginTarget>()
   const [error, setError] = useState('')
@@ -68,12 +79,15 @@ function PluginBrowser({ server, request, target }: { server: ServerView; reques
     {notice && <p role="status" className="border border-border p-3 text-sm">{notice}</p>}
     {(server.pid !== null || server.status === 'starting' || server.status === 'stopping') && <p className="text-sm text-muted-foreground">You can browse now. Stop this server from the controls above to enable installation.</p>}
     {error && <p role="alert" className="text-destructive">{error} <button className="underline" onClick={() => setSearch((value) => ({ ...value, attempt: value.attempt + 1 }))}>Retry</button></p>}
-    {loading ? <Skeleton label="Searching Modrinth" /> : results && <>
+    {loading ? <PluginCardsSkeleton /> : results && <>
       <p className="text-sm text-muted-foreground">{results.total.toLocaleString()} matching projects. Only compatible releases can be installed.</p>
       {!results.projects.length && <p className="border border-border p-5">No plugins found. Try a different search or version.</p>}
-      <div className="divide-y divide-border border-y border-border">{results.projects.map((item) => <article key={item.id} className="py-4">
-        <div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="font-bold">{item.title}</h3><p className="text-xs text-muted-foreground">By {item.author} · {item.downloads.toLocaleString()} downloads</p></div><button className={button} disabled={locked} onClick={() => setProject(item)}>Choose version</button></div>
-        <p className="mt-2 text-sm">{item.description}</p><a className="mt-2 inline-block text-sm underline" href={`https://modrinth.com/plugin/${item.slug}`} target="_blank" rel="noreferrer">View on Modrinth</a>
+      <div className="grid items-start gap-4 sm:grid-cols-2">{results.projects.map((item) => <article key={item.id} className="flex min-w-0 flex-col border border-border bg-background p-5">
+        <PluginIcon key={`${item.id}:${item.iconUrl}`} project={item} />
+        <h3 className="break-words text-lg font-bold"><a href={`https://modrinth.com/plugin/${item.slug}`} target="_blank" rel="noreferrer" className="underline-offset-4 focus-visible:underline">{item.title}</a></h3>
+        <p className="mt-1 text-xs text-muted-foreground">{item.author} · {item.downloads.toLocaleString()} downloads</p>
+        <p className="mt-3 min-h-20 break-words text-sm">{item.description}</p>
+        <button className={`${button} mt-5 w-full uppercase`} aria-label={`Install ${item.title}`} aria-expanded={project?.id === item.id} disabled={locked} onClick={() => setProject(project?.id === item.id ? undefined : item)}>Install</button>
         {project?.id === item.id && <PluginDetails key={`${item.id}:${loader}:${gameVersion}`} project={item} target={target} server={server} request={request} onInstalling={setInstalling} onInstalled={(message) => { setNotice(message); setRefresh((value) => value + 1); setProject(undefined) }} />}
       </article>)}</div>
       <div className="flex items-center justify-between gap-3"><button className={button} disabled={locked || search.offset === 0} onClick={() => setSearch((value) => ({ ...value, offset: Math.max(0, value.offset - 20) }))}>Previous</button><span className="text-sm">Page {Math.floor(search.offset / 20) + 1}</span><button className={button} disabled={locked || search.offset + 20 >= results.total || search.offset >= 10_000} onClick={() => setSearch((value) => ({ ...value, offset: value.offset + 20 }))}>Next</button></div>
@@ -123,7 +137,7 @@ function PluginDetails({ project, target, server, request, onInstalling, onInsta
     finally { setBusy(false); onInstalling(false) }
   }
   return <div className="mt-4 border border-border bg-muted/30 p-4">
-    {loading ? <Skeleton label="Loading plugin releases" /> : versions.length ? <label className="grid gap-2 text-sm">Release<select className={control} disabled={busy || server.pluginsInstalling} value={versionId} onChange={(event) => setVersionId(event.target.value)}>{versions.map((version) => <option value={version.id} key={version.id}>{version.name} · {version.published.slice(0, 10)}</option>)}</select></label> : !error && <p>No stable release supports this server software and Minecraft version.</p>}
+    {loading ? <Skeleton label="Loading plugin releases" /> : versions.length ? <label className="grid gap-2 text-sm">Release<select className={`${control} min-w-0 w-full`} disabled={busy || server.pluginsInstalling} value={versionId} onChange={(event) => setVersionId(event.target.value)}>{versions.map((version) => <option value={version.id} key={version.id}>{version.name} · {version.published.slice(0, 10)}</option>)}</select></label> : !error && <p>No stable release supports this server software and Minecraft version.</p>}
     {planning && <Skeleton label="Checking required dependencies" />}
     {plan && !planning && <><h4 className="mt-4 font-semibold">Review installation</h4><p className="mt-1 text-sm text-muted-foreground">These files include required dependencies. Existing files will not be overwritten.</p><ul className="mt-3 divide-y divide-border">{plan.items.map((item) => <li key={item.id} className="py-2 text-sm"><a className="underline" href={`https://modrinth.com/project/${item.projectId}`} target="_blank" rel="noreferrer">{item.name}</a><span className="ml-2 text-muted-foreground">{size(item.size)}</span><span className="mt-1 block break-all font-mono text-xs text-muted-foreground">{item.filename}</span></li>)}</ul>
       <button className={`${button} mt-4`} disabled={busy || server.pluginsInstalling || server.pid !== null || !['stopped', 'crashed'].includes(server.status)} onClick={() => void install()}>{busy || server.pluginsInstalling ? 'Installing…' : `Install ${plan.items.length === 1 ? 'plugin' : `${plan.items.length} plugins`}`}</button></>}
